@@ -1,0 +1,46 @@
+services:
+
+  # ── FastAPI application ───────────────────────────────────────────────────────
+  app:
+    build: .
+    container_name: sdi-app
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app/app
+      - sdi_audio:/tmp/sdi_audio
+    depends_on:
+      - ngrok
+      - kokoro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ── ngrok tunnel ─────────────────────────────────────────────────────────────
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: sdi-ngrok
+    command: http app:8000 --log stdout
+    ports:
+      - "4040:4040"
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN:-}
+    restart: unless-stopped
+
+  # ── Kokoro TTS (free, local, OpenAI-compatible) ───────────────────────────────
+  # OpenAI-compatible TTS API at http://kokoro:8880/v1
+  # Voices: af_bella, af_sarah, am_adam, am_michael, bf_emma, bm_george
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.2
+    container_name: sdi-kokoro
+    ports:
+      - "8880:8880"
+    restart: unless-stopped
+
+volumes:
+  sdi_audio:

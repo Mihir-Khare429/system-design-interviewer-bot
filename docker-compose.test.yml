@@ -1,0 +1,11 @@
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: sdi-tests
+    environment:
+      - RECALL_API_KEY=test_recall_key
+      - OPENAI_API_KEY=test_openai_key
+      - WEBHOOK_BASE_URL=https://test.ngrok-free.app
+      - BOT_PERSONA_NAME=System Design Interviewer
