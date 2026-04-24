@@ -11,15 +11,19 @@ Endpoints:
   DELETE /api/sessions/{bot_id}     → manually end a session
 """
 
+import asyncio
+import base64
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, HttpUrl
 
 from app import bot_runner
+from app import ui_session as ui_runner
 from app.recall_client import recall_client
 
 logging.basicConfig(
@@ -215,3 +219,50 @@ async def end_session(bot_id: str):
     except Exception:
         pass  # Bot may already be gone
     return {"status": "stopped", "bot_id": bot_id}
+
+
+# ---------------------------------------------------------------------------
+# Browser UI — single-page app served at /ui
+# ---------------------------------------------------------------------------
+
+_UI_HTML = Path(__file__).parent / "static" / "index.html"
+
+
+@app.get("/ui", tags=["ui"], response_class=HTMLResponse)
+async def serve_ui():
+    """Serve the browser-based interview UI."""
+    if not _UI_HTML.exists():
+        raise HTTPException(status_code=503, detail="UI not built yet.")
+    return HTMLResponse(_UI_HTML.read_text())
+
+
+@app.websocket("/ws/interview")
+async def interview_websocket(websocket: WebSocket):
+    """
+    WebSocket endpoint for the browser UI interview session.
+
+    Client sends:  {"type": "audio", "data": "<base64>", "mime": "audio/webm"}
+    Server sends:  {"type": "transcript"|"response"|"phase_change"|"session_started", ...}
+    """
+    await websocket.accept()
+    session_id = uuid.uuid4().hex[:8]
+    session = ui_runner.create_ui_session(session_id, websocket)
+
+    try:
+        await websocket.send_json({"type": "session_started", "session_id": session_id})
+        asyncio.create_task(session.start())
+
+        while True:
+            data = await websocket.receive_json()
+            if data.get("type") == "audio":
+                audio_bytes = base64.b64decode(data["data"])
+                mime = data.get("mime", "audio/webm")
+                asyncio.create_task(session.process_audio(audio_bytes, mime))
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("WebSocket session %s error: %s", session_id, exc)
+    finally:
+        await session.stop()
+        ui_runner.remove_ui_session(session_id)

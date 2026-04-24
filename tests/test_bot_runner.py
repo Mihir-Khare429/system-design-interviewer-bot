@@ -176,19 +176,18 @@ class TestSpeak:
         assert "Where is your cache?" in args[1]
 
     @patch("app.bot_runner.recall_client")
-    @patch("app.bot_runner._openai")
-    async def test_plays_audio_when_webhook_url_is_public(self, mock_openai, mock_recall):
+    @patch("app.bot_runner._tts_client")
+    async def test_plays_audio_when_webhook_url_is_public(self, mock_tts, mock_recall):
         mock_recall.send_chat_message = AsyncMock(return_value={})
-        mock_recall.play_media = AsyncMock(return_value={})
+        mock_recall.play_audio = AsyncMock(return_value={})
         fake_audio = b"\xff\xfb" + b"\x00" * 200
-        mock_openai.audio.speech.create = AsyncMock(
+        mock_tts.audio.speech.create = AsyncMock(
             return_value=MagicMock(content=fake_audio)
         )
 
         s = InterviewSession("bot_004")
-        # WEBHOOK_BASE_URL is already set to https:// in conftest
         await s._speak("What is your RTO?")
-        mock_recall.play_media.assert_called_once()
+        mock_recall.play_audio.assert_called_once()
 
     @patch("app.bot_runner.recall_client")
     async def test_does_not_raise_when_chat_message_fails(self, mock_recall):

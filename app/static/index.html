@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>System Design Interview</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #080c18;
+  --surface: #0f1424;
+  --surface2: #161d32;
+  --surface3: #1e2840;
+  --border: #263050;
+  --text: #dce6f5;
+  --muted: #5a6e96;
+  --accent: #6366f1;
+  --accent-dim: rgba(99,102,241,0.12);
+  --accent-glow: rgba(99,102,241,0.22);
+  --green: #10b981;
+  --yellow: #f59e0b;
+  --red: #ef4444;
+  --blue: #3b82f6;
+}
+
+html, body { height: 100%; overflow: hidden; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+}
+
+/* ── Header ─────────────────────────────────────────────── */
+#header {
+  height: 54px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 14px;
+  flex-shrink: 0;
+  z-index: 10;
+}
+.avatar {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 13px; color: #fff; flex-shrink: 0;
+  box-shadow: 0 0 0 2px rgba(99,102,241,0.3);
+}
+#header h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.3px; }
+
+#phase-pill {
+  padding: 3px 11px; border-radius: 20px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase;
+  background: var(--accent-dim); color: var(--accent); border: 1px solid rgba(99,102,241,0.3);
+  transition: all 0.5s ease;
+}
+#phase-pill.CONSTRAINTS { background: rgba(245,158,11,.12); color:#f59e0b; border-color:rgba(245,158,11,.3); }
+#phase-pill.DESIGN      { background: rgba(59,130,246,.12);  color:#3b82f6; border-color:rgba(59,130,246,.3); }
+#phase-pill.DEEP_DIVE   { background: rgba(239,68,68,.12);   color:#ef4444; border-color:rgba(239,68,68,.3); }
+
+#conn-status {
+  margin-left: auto; display: flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--muted);
+}
+#conn-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--muted); transition: background .4s;
+}
+#conn-dot.live { background: var(--green); animation: pulse-dot 2s infinite; }
+@keyframes pulse-dot {
+  0%,100% { box-shadow: 0 0 0 0 rgba(16,185,129,.4); }
+  50%      { box-shadow: 0 0 0 5px rgba(16,185,129,0); }
+}
+
+/* ── Main layout ─────────────────────────────────────────── */
+#main { display: flex; flex: 1; overflow: hidden; }
+
+/* ── Sidebar ─────────────────────────────────────────────── */
+#sidebar {
+  width: 196px; flex-shrink: 0;
+  background: var(--surface); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+#sidebar::-webkit-scrollbar { width: 4px; }
+#sidebar::-webkit-scrollbar-track { background: transparent; }
+#sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.sidebar-label {
+  padding: 14px 14px 6px;
+  font-size: 10px; font-weight: 700; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--muted);
+}
+.comp-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 12px; margin: 1px 6px;
+  border-radius: 7px; cursor: grab;
+  font-size: 12px; font-weight: 500;
+  transition: background .15s, transform .1s;
+  user-select: none;
+}
+.comp-item:hover { background: var(--surface2); }
+.comp-item:active { cursor: grabbing; transform: scale(0.97); }
+.comp-icon-box {
+  width: 30px; height: 30px; border-radius: 7px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; flex-shrink: 0;
+}
+.comp-name { color: var(--text); font-size: 12px; line-height: 1.3; }
+
+/* ── Canvas ──────────────────────────────────────────────── */
+#canvas-wrap {
+  flex: 1; position: relative; overflow: hidden;
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(circle, rgba(99,102,241,0.07) 1px, transparent 1px);
+  background-size: 28px 28px;
+  background-position: 14px 14px;
+}
+#arrow-svg {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none;
+}
+#arrow-svg .arrow-path { pointer-events: stroke; cursor: pointer; }
+#canvas-wrap.connect-mode { cursor: crosshair; }
+
+/* Canvas toolbar */
+#c-toolbar {
+  position: absolute; top: 12px; left: 12px;
+  display: flex; gap: 6px; z-index: 5;
+}
+.tb-btn {
+  padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--muted);
+  font-size: 12px; font-weight: 500; cursor: pointer;
+  transition: all .15s;
+}
+.tb-btn:hover { border-color: var(--accent); color: var(--text); }
+.tb-btn.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+
+#canvas-hint {
+  position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+  font-size: 11px; color: var(--muted);
+  background: var(--surface); padding: 5px 14px;
+  border-radius: 20px; border: 1px solid var(--border);
+  pointer-events: none; white-space: nowrap;
+}
+
+/* Canvas nodes */
+.c-node {
+  position: absolute;
+  background: var(--surface2); border: 1.5px solid var(--border);
+  border-radius: 10px; padding: 10px 12px;
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  cursor: move; min-width: 88px; user-select: none;
+  transition: border-color .15s, box-shadow .15s;
+  z-index: 2;
+}
+.c-node:hover { border-color: rgba(99,102,241,.5); box-shadow: 0 0 0 3px var(--accent-glow); }
+.c-node.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow), 0 4px 20px rgba(0,0,0,.4); }
+.c-node.conn-src  { border-color: var(--green); box-shadow: 0 0 0 3px rgba(16,185,129,.25); }
+.c-node .ni { font-size: 20px; line-height: 1; }
+.c-node .nl {
+  font-size: 11px; color: var(--muted); text-align: center;
+  white-space: nowrap; outline: none;
+}
+.c-node .nl:focus { color: var(--text); }
+
+/* ── Chat panel ──────────────────────────────────────────── */
+#chat-panel {
+  width: 320px; flex-shrink: 0;
+  background: var(--surface); border-left: 1px solid var(--border);
+  display: flex; flex-direction: column;
+}
+
+#chat-head {
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+}
+#chat-head .info { flex: 1; }
+#chat-head .name { font-size: 13px; font-weight: 600; }
+#chat-head .role { font-size: 11px; color: var(--muted); }
+
+/* speaking waveform */
+#wave {
+  display: flex; align-items: center; gap: 2px;
+  height: 20px; margin-left: auto;
+  opacity: 0; transition: opacity .3s;
+}
+#wave.active { opacity: 1; }
+#wave span {
+  width: 3px; border-radius: 3px;
+  background: var(--accent);
+  animation: wave 0.9s ease-in-out infinite;
+}
+#wave span:nth-child(1){ height:6px;  animation-delay:0s;    }
+#wave span:nth-child(2){ height:12px; animation-delay:.12s;  }
+#wave span:nth-child(3){ height:18px; animation-delay:.24s;  }
+#wave span:nth-child(4){ height:10px; animation-delay:.06s;  }
+#wave span:nth-child(5){ height:14px; animation-delay:.18s;  }
+#wave span:nth-child(6){ height:8px;  animation-delay:.3s;   }
+@keyframes wave {
+  0%,100% { transform: scaleY(.4); opacity:.4; }
+  50%      { transform: scaleY(1);  opacity:1;  }
+}
+
+/* Problem card */
+#problem-card {
+  margin: 10px; padding: 10px 12px;
+  background: rgba(245,158,11,.07); border: 1px solid rgba(245,158,11,.25);
+  border-radius: 8px; font-size: 12px; color: #f59e0b; line-height: 1.55;
+  display: none;
+  animation: slideIn .4s ease;
+}
+
+/* Transcript */
+#transcript {
+  flex: 1; overflow-y: auto; padding: 12px;
+  display: flex; flex-direction: column; gap: 10px;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+#transcript::-webkit-scrollbar { width: 4px; }
+#transcript::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.msg { animation: slideIn .25s ease; }
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.msg-who {
+  font-size: 10px; font-weight: 700; letter-spacing: .6px;
+  text-transform: uppercase; margin-bottom: 4px;
+}
+.msg.alex  .msg-who { color: var(--accent); }
+.msg.user  .msg-who { color: var(--muted);  text-align: right; }
+.msg-bubble {
+  padding: 9px 13px; border-radius: 12px;
+  font-size: 13px; line-height: 1.55;
+}
+.msg.alex .msg-bubble {
+  background: var(--surface2);
+  border-radius: 3px 12px 12px 12px;
+}
+.msg.user .msg-bubble {
+  background: var(--accent-dim); border: 1px solid rgba(99,102,241,.2);
+  border-radius: 12px 12px 3px 12px; text-align: right;
+}
+
+/* Audio controls */
+#audio-ctrl {
+  padding: 16px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  flex-shrink: 0;
+}
+#mic-btn {
+  width: 60px; height: 60px; border-radius: 50%;
+  background: var(--surface2); border: 2px solid var(--border);
+  color: var(--muted); font-size: 22px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: all .2s; position: relative; flex-shrink: 0;
+  outline: none;
+}
+#mic-btn:hover { border-color: var(--accent); color: var(--accent); }
+#mic-btn.rec {
+  background: rgba(239,68,68,.1); border-color: var(--red); color: var(--red);
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+#mic-btn.proc { background: rgba(245,158,11,.1); border-color: var(--yellow); color: var(--yellow); }
+@keyframes mic-pulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.5); }
+  50%      { box-shadow: 0 0 0 14px rgba(239,68,68,0); }
+}
+#mic-hint { font-size: 11px; color: var(--muted); text-align: center; }
+#kb-hint   { font-size: 10px; color: var(--border);  }
+
+/* Toast */
+#toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+  background: var(--surface3); border: 1px solid var(--border);
+  border-radius: 8px; padding: 9px 18px; font-size: 12px;
+  opacity: 0; transition: all .3s; pointer-events: none; z-index: 100;
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* Phase transition overlay */
+#phase-banner {
+  position: fixed; top: 66px; left: 50%; transform: translateX(-50%) scale(.9);
+  background: var(--surface3); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 24px; text-align: center;
+  opacity: 0; transition: all .4s cubic-bezier(.34,1.56,.64,1); pointer-events: none; z-index: 50;
+}
+#phase-banner.show { opacity: 1; transform: translateX(-50%) scale(1); }
+#phase-banner .pb-title { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+#phase-banner .pb-name  { font-size: 18px; font-weight: 700; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div id="header">
+  <div class="avatar">A</div>
+  <h1>System Design Interview</h1>
+  <div id="phase-pill">Intro</div>
+  <div id="conn-status">
+    <div id="conn-dot"></div>
+    <span id="conn-text">Connecting…</span>
+  </div>
+</div>
+
+<!-- Main -->
+<div id="main">
+
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <div class="sidebar-label">Components</div>
+    <div id="comp-list"></div>
+  </div>
+
+  <!-- Canvas -->
+  <div id="canvas-wrap" id="cv"
+       ondragover="event.preventDefault()"
+       ondrop="onCanvasDrop(event)">
+
+    <!-- SVG arrow layer -->
+    <svg id="arrow-svg">
+      <defs>
+        <marker id="ah" markerWidth="9" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 9 3, 0 6" fill="#6366f1" opacity="0.8"/>
+        </marker>
+        <marker id="ah-del" markerWidth="9" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 9 3, 0 6" fill="#ef4444" opacity="0.8"/>
+        </marker>
+      </defs>
+    </svg>
+
+    <!-- Toolbar -->
+    <div id="c-toolbar">
+      <button class="tb-btn active" id="btn-sel"  onclick="setMode('sel')">&#9654; Select</button>
+      <button class="tb-btn"        id="btn-conn" onclick="setMode('conn')">&#8596; Connect</button>
+      <button class="tb-btn"                      onclick="deleteSelected()">&#10005; Delete</button>
+      <button class="tb-btn"                      onclick="clearCanvas()">&#128465; Clear</button>
+    </div>
+
+    <div id="canvas-hint">Drag components from the sidebar · Select + Connect to draw arrows · Double-click to rename</div>
+  </div>
+
+  <!-- Chat panel -->
+  <div id="chat-panel">
+    <div id="chat-head">
+      <div class="avatar" style="width:36px;height:36px;font-size:14px">A</div>
+      <div class="info">
+        <div class="name">Alex</div>
+        <div class="role">Senior Staff Engineer</div>
+      </div>
+      <div id="wave"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+    </div>
+
+    <div id="problem-card"></div>
+    <div id="transcript"></div>
+
+    <div id="audio-ctrl">
+      <button id="mic-btn" title="Hold Space or click-hold to speak">🎤</button>
+      <div id="mic-hint">Hold to speak · Release to send</div>
+      <div id="kb-hint">Keyboard: hold Space</div>
+    </div>
+  </div>
+
+</div><!-- /main -->
+
+<div id="toast"></div>
+<div id="phase-banner">
+  <div class="pb-title">Phase</div>
+  <div class="pb-name" id="pb-name-text"></div>
+</div>
+
+<script>
+// ── Component definitions ─────────────────────────────────────────────────────
+const COMPS = [
+  { type:'client',   icon:'👤', label:'Client',         color:'#6366f1' },
+  { type:'dns',      icon:'🌐', label:'DNS',             color:'#8b5cf6' },
+  { type:'cdn',      icon:'📡', label:'CDN',             color:'#06b6d4' },
+  { type:'lb',       icon:'⚖️',  label:'Load Balancer',  color:'#3b82f6' },
+  { type:'gateway',  icon:'🔀', label:'API Gateway',     color:'#0ea5e9' },
+  { type:'service',  icon:'⚙️',  label:'Service',        color:'#10b981' },
+  { type:'cache',    icon:'⚡', label:'Cache',           color:'#f59e0b' },
+  { type:'queue',    icon:'📬', label:'Message Queue',   color:'#f97316' },
+  { type:'sql',      icon:'🗄️',  label:'SQL Database',   color:'#ef4444' },
+  { type:'nosql',    icon:'🍃', label:'NoSQL DB',        color:'#22c55e' },
+  { type:'storage',  icon:'🪣', label:'Object Storage',  color:'#a855f7' },
+  { type:'search',   icon:'🔍', label:'Search',          color:'#ec4899' },
+  { type:'worker',   icon:'🔧', label:'Worker',          color:'#94a3b8' },
+];
+
+// Build sidebar
+const compList = document.getElementById('comp-list');
+COMPS.forEach(c => {
+  const item = document.createElement('div');
+  item.className = 'comp-item';
+  item.draggable = true;
+  item.dataset.type = c.type;
+  item.innerHTML = `
+    <div class="comp-icon-box" style="background:${c.color}1a;">${c.icon}</div>
+    <div class="comp-name">${c.label}</div>
+  `;
+  item.addEventListener('dragstart', e => e.dataTransfer.setData('comp-type', c.type));
+  item.addEventListener('click', () => addNode(c.type, 120 + Math.random()*300, 80 + Math.random()*200));
+  compList.appendChild(item);
+});
+
+// ── Canvas state ──────────────────────────────────────────────────────────────
+let nodes = [];   // {id, type, x, y, el}
+let edges = [];   // {id, from, to, g, path, click}
+let selId = null;
+let mode = 'sel'; // 'sel' | 'conn'
+let connSrcId = null;
+let drag = null;  // {nodeId, ox, oy}
+let nodeCounter = 0;
+let edgeCounter = 0;
+
+const canvasWrap = document.getElementById('canvas-wrap');
+const svg = document.getElementById('arrow-svg');
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('btn-sel').classList.toggle('active', m === 'sel');
+  document.getElementById('btn-conn').classList.toggle('active', m === 'conn');
+  canvasWrap.classList.toggle('connect-mode', m === 'conn');
+  if (m === 'sel') clearConnSrc();
+}
+
+function onCanvasDrop(e) {
+  const type = e.dataTransfer.getData('comp-type');
+  if (!type) return;
+  const rect = canvasWrap.getBoundingClientRect();
+  addNode(type, e.clientX - rect.left - 45, e.clientY - rect.top - 30);
+}
+
+function addNode(type, x, y) {
+  const comp = COMPS.find(c => c.type === type);
+  const id = `n${++nodeCounter}`;
+  const el = document.createElement('div');
+  el.className = 'c-node';
+  el.id = id;
+  el.style.left = x + 'px';
+  el.style.top  = y + 'px';
+  el.style.borderColor = comp.color + '55';
+  el.innerHTML = `<div class="ni">${comp.icon}</div><div class="nl" contenteditable="false">${comp.label}</div>`;
+
+  el.addEventListener('mousedown', e => onNodeDown(e, id));
+  el.addEventListener('click',     e => onNodeClick(e, id));
+  el.addEventListener('dblclick',  e => onNodeDblClick(e, id));
+
+  canvasWrap.appendChild(el);
+  nodes.push({ id, type, x, y, el, comp });
+}
+
+function getComp(id) { return nodes.find(n => n.id === id); }
+
+// ── Node interaction ──────────────────────────────────────────────────────────
+function onNodeDown(e, id) {
+  if (mode === 'conn') return;
+  e.stopPropagation();
+  const node = getComp(id);
+  drag = { id, ox: e.clientX - node.x, oy: e.clientY - node.y };
+}
+
+function onNodeClick(e, id) {
+  e.stopPropagation();
+  if (mode === 'conn') {
+    if (!connSrcId) {
+      connSrcId = id;
+      getComp(id).el.classList.add('conn-src');
+      toast('Now click a target component to connect');
+    } else if (connSrcId !== id) {
+      addEdge(connSrcId, id);
+      clearConnSrc();
+    }
+    return;
+  }
+  // select mode
+  if (selId === id) return;
+  clearSel();
+  selId = id;
+  getComp(id).el.classList.add('selected');
+}
+
+function onNodeDblClick(e, id) {
+  e.stopPropagation();
+  const node = getComp(id);
+  const label = node.el.querySelector('.nl');
+  label.contentEditable = 'true';
+  label.focus();
+  const range = document.createRange();
+  range.selectNodeContents(label);
+  window.getSelection().removeAllRanges();
+  window.getSelection().addRange(range);
+  label.addEventListener('blur', () => { label.contentEditable = 'false'; }, { once: true });
+  label.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); label.blur(); } }, { once: true });
+}
+
+// Global mouse handlers for drag
+document.addEventListener('mousemove', e => {
+  if (!drag) return;
+  const node = getComp(drag.id);
+  node.x = e.clientX - drag.ox;
+  node.y = e.clientY - drag.oy;
+  node.el.style.left = node.x + 'px';
+  node.el.style.top  = node.y + 'px';
+  updateAllEdges();
+});
+document.addEventListener('mouseup', () => { drag = null; });
+
+// Click on canvas background → deselect
+canvasWrap.addEventListener('click', () => { clearSel(); clearConnSrc(); });
+
+function clearSel() {
+  if (selId) { const n = getComp(selId); if (n) n.el.classList.remove('selected'); }
+  selId = null;
+}
+function clearConnSrc() {
+  if (connSrcId) { const n = getComp(connSrcId); if (n) n.el.classList.remove('conn-src'); }
+  connSrcId = null;
+}
+
+function deleteSelected() {
+  if (selId) removeNode(selId);
+}
+function removeNode(id) {
+  edges.filter(e => e.from === id || e.to === id).forEach(e => removeEdge(e.id));
+  const node = getComp(id);
+  if (node) node.el.remove();
+  nodes = nodes.filter(n => n.id !== id);
+  if (selId === id) selId = null;
+}
+function clearCanvas() {
+  [...nodes].forEach(n => removeNode(n.id));
+  nodes = []; edges = [];
+}
+
+// ── Edges ─────────────────────────────────────────────────────────────────────
+function addEdge(fromId, toId) {
+  if (edges.find(e => e.from === fromId && e.to === toId)) return;
+  const id = `e${++edgeCounter}`;
+  const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+  g.id = id;
+
+  const click = document.createElementNS('http://www.w3.org/2000/svg','path');
+  click.setAttribute('stroke','transparent');
+  click.setAttribute('stroke-width','14');
+  click.setAttribute('fill','none');
+  click.style.cursor = 'pointer';
+  click.addEventListener('mouseenter', () => path.setAttribute('stroke','#ef4444'));
+  click.addEventListener('mouseleave', () => path.setAttribute('stroke','#6366f1'));
+  click.addEventListener('click', e => { e.stopPropagation(); removeEdge(id); });
+
+  const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+  path.setAttribute('stroke','#6366f1');
+  path.setAttribute('stroke-width','1.8');
+  path.setAttribute('fill','none');
+  path.setAttribute('stroke-opacity','0.7');
+  path.setAttribute('marker-end','url(#ah)');
+  path.style.transition = 'stroke .2s';
+
+  g.appendChild(click);
+  g.appendChild(path);
+  svg.appendChild(g);
+
+  const edge = { id, from: fromId, to: toId, g, path, click };
+  edges.push(edge);
+  updateEdge(edge);
+}
+
+function removeEdge(id) {
+  const edge = edges.find(e => e.id === id);
+  if (edge) { edge.g.remove(); edges = edges.filter(e => e.id !== id); }
+}
+
+function getCenter(node) {
+  return { x: node.x + node.el.offsetWidth/2, y: node.y + node.el.offsetHeight/2 };
+}
+function getEdgePts(from, to) {
+  const fc = getCenter(from), tc = getCenter(to);
+  const dx = tc.x-fc.x, dy = tc.y-fc.y;
+  const dist = Math.sqrt(dx*dx+dy*dy) || 1;
+  const nx = dx/dist, ny = dy/dist;
+  const fo = Math.max(from.el.offsetWidth, from.el.offsetHeight)/2 + 6;
+  const te = Math.max(to.el.offsetWidth,   to.el.offsetHeight  )/2 + 8;
+  return { x1: fc.x+nx*fo, y1: fc.y+ny*fo, x2: tc.x-nx*te, y2: tc.y-ny*te };
+}
+function updateEdge(edge) {
+  const from = getComp(edge.from), to = getComp(edge.to);
+  if (!from || !to) return;
+  const { x1,y1,x2,y2 } = getEdgePts(from, to);
+  const cx1 = x1+(x2-x1)*.45, cy1 = y1, cx2 = x1+(x2-x1)*.55, cy2 = y2;
+  const d = `M${x1} ${y1} C${cx1} ${cy1},${cx2} ${cy2},${x2} ${y2}`;
+  edge.path.setAttribute('d', d);
+  edge.click.setAttribute('d', d);
+}
+function updateAllEdges() { edges.forEach(updateEdge); }
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key === 'Backspace' && !isEditing()) deleteSelected();
+  if (e.key === ' ' && !isEditing()) { e.preventDefault(); startRecording(); }
+  if (e.key === 'Escape') { setMode('sel'); clearSel(); }
+});
+document.addEventListener('keyup', e => {
+  if (e.key === ' ' && !isEditing()) stopRecording();
+});
+function isEditing() {
+  const el = document.activeElement;
+  return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.contentEditable === 'true');
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+let ws = null;
+const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const WS_URL = `${proto}//${location.host}/ws/interview`;
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    setConnStatus(true);
+  };
+  ws.onmessage = e => {
+    try { handleMsg(JSON.parse(e.data)); } catch(err) { console.error(err); }
+  };
+  ws.onclose = () => {
+    setConnStatus(false);
+    setTimeout(connect, 3000); // reconnect
+  };
+  ws.onerror = () => ws.close();
+}
+
+function setConnStatus(live) {
+  document.getElementById('conn-dot').className = live ? 'live' : '';
+  document.getElementById('conn-text').textContent = live ? 'Live' : 'Reconnecting…';
+}
+
+function handleMsg(data) {
+  switch(data.type) {
+    case 'session_started':
+      break;
+    case 'transcript':
+      addMsg('user', data.text);
+      break;
+    case 'response':
+      addMsg('alex', data.text);
+      if (data.audio) playAudio(data.audio);
+      break;
+    case 'phase_change':
+      updatePhase(data.phase);
+      if (data.problem_brief) showProblem(data.problem_brief);
+      break;
+  }
+}
+
+// ── Audio ─────────────────────────────────────────────────────────────────────
+let mediaStream = null, recorder = null, audioChunks = [], recActive = false;
+
+async function startRecording() {
+  if (recActive) return;
+  try {
+    if (!mediaStream) mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus' : 'audio/webm';
+    recorder = new MediaRecorder(mediaStream, { mimeType });
+    audioChunks = [];
+    recorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+    recorder.onstop = sendAudio;
+    recorder.start(80);
+    recActive = true;
+    setMicState('rec');
+  } catch(err) {
+    toast('Microphone access denied');
+    console.error(err);
+  }
+}
+function stopRecording() {
+  if (!recActive || !recorder) return;
+  recorder.stop();
+  recActive = false;
+  setMicState('proc');
+}
+function sendAudio() {
+  const blob = new Blob(audioChunks, { type: recorder.mimeType });
+  if (blob.size < 800) { setMicState(''); return; } // too short
+  const reader = new FileReader();
+  reader.onloadend = () => {
+    const b64 = reader.result.split(',')[1];
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type:'audio', data:b64, mime: recorder.mimeType }));
+    }
+    setMicState('');
+  };
+  reader.readAsDataURL(blob);
+}
+function setMicState(state) {
+  const btn = document.getElementById('mic-btn');
+  const hint = document.getElementById('mic-hint');
+  btn.className = state;
+  if (state === 'rec')  { btn.textContent='🔴'; hint.textContent='Recording… release to send'; }
+  else if (state==='proc'){ btn.textContent='⏳'; hint.textContent='Processing…'; }
+  else                  { btn.textContent='🎤'; hint.textContent='Hold to speak · Release to send'; }
+}
+
+// Mic button mouse events
+const micBtn = document.getElementById('mic-btn');
+micBtn.addEventListener('mousedown', e => { e.preventDefault(); startRecording(); });
+micBtn.addEventListener('mouseup',   () => stopRecording());
+micBtn.addEventListener('mouseleave',() => { if (recActive) stopRecording(); });
+
+// Audio playback
+let audioQueue = [], audioPlaying = false;
+function playAudio(b64) {
+  audioQueue.push(b64);
+  if (!audioPlaying) drainAudio();
+}
+function drainAudio() {
+  if (!audioQueue.length) { audioPlaying=false; setWave(false); return; }
+  audioPlaying = true;
+  setWave(true);
+  const b64 = audioQueue.shift();
+  const bytes = atob(b64);
+  const buf = new ArrayBuffer(bytes.length);
+  const arr = new Uint8Array(buf);
+  for (let i=0;i<bytes.length;i++) arr[i]=bytes.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([buf],{type:'audio/mp3'}));
+  const audio = new Audio(url);
+  audio.onended = () => { URL.revokeObjectURL(url); drainAudio(); };
+  audio.onerror  = () => drainAudio();
+  audio.play().catch(() => drainAudio());
+}
+function setWave(on) { document.getElementById('wave').classList.toggle('active', on); }
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function addMsg(role, text) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.innerHTML = `
+    <div class="msg-who">${role === 'alex' ? 'Alex' : 'You'}</div>
+    <div class="msg-bubble">${esc(text)}</div>
+  `;
+  const t = document.getElementById('transcript');
+  t.appendChild(div);
+  t.scrollTop = t.scrollHeight;
+}
+
+const PHASE_LABELS = { INTRO:'Intro', CONSTRAINTS:'Clarification', DESIGN:'Design', DEEP_DIVE:'Deep Dive' };
+function updatePhase(phase) {
+  const pill = document.getElementById('phase-pill');
+  pill.textContent = PHASE_LABELS[phase] || phase;
+  pill.className = phase;
+
+  const banner = document.getElementById('phase-banner');
+  document.getElementById('pb-name-text').textContent = PHASE_LABELS[phase] || phase;
+  banner.classList.add('show');
+  setTimeout(() => banner.classList.remove('show'), 2800);
+}
+
+function showProblem(brief) {
+  const card = document.getElementById('problem-card');
+  card.textContent = '🎯 ' + brief;
+  card.style.display = 'block';
+}
+
+let toastTimer = null;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+function esc(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+connect();
+</script>
+</body>
+</html>
