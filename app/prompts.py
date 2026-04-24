@@ -78,6 +78,46 @@ Be sharper, more adversarial. Push the candidate to defend every choice.
 """,
 }
 
+DIFFICULTY_PROMPTS = {
+    "easy": (
+        "DIFFICULTY CALIBRATION: Junior engineer bar. "
+        "Be warm and encouraging. Offer gentle nudges when the candidate is stuck. "
+        "Accept rough-outline answers without pushing for precise numbers. Don't be adversarial."
+    ),
+    "medium": (
+        "DIFFICULTY CALIBRATION: Mid-level engineer bar. "
+        "Standard expectations. Push back on important gaps but remain constructive. "
+        "Expect basic distributed systems awareness and back-of-envelope estimates."
+    ),
+    "hard": (
+        "DIFFICULTY CALIBRATION: Senior engineer bar. "
+        "High expectations. Demand precise estimates, clear trade-off reasoning, and production-grade thinking. "
+        "Push back firmly on every vague answer."
+    ),
+    "staff": (
+        "DIFFICULTY CALIBRATION: Staff engineer bar. "
+        "Be sharply adversarial from the start. Challenge every assumption. "
+        "Expect cost, security, multi-region, and failure-cascade reasoning upfront. "
+        "Accept nothing hand-wavy. This is a FAANG Staff-level bar."
+    ),
+}
+
+SCORECARD_PROMPT = """
+The interview is now complete. Based on the entire conversation above, produce an honest performance assessment.
+
+Reply ONLY with a valid JSON object — no markdown, no code fences, no explanation, no other text before or after:
+{
+  "grade": "one of: A / A- / B+ / B / B- / C+ / C / D",
+  "hire": "one of: Strong Hire / Hire / Borderline / No Hire",
+  "summary": "2-3 honest sentences about overall performance",
+  "strengths": ["strength 1", "strength 2", "strength 3"],
+  "gaps": ["gap 1", "gap 2", "gap 3"],
+  "study": ["specific topic to study 1", "specific topic 2", "specific topic 3"]
+}
+
+Grade on FAANG Senior Engineer bar. Be accurate — a B is solid and hireable, a C means real gaps.
+"""
+
 SCREENSHOT_ANALYSIS_PROMPT = """
 You are reviewing a live screenshot of a system design whiteboard during an interview.
 Identify ONE specific architectural gap, missing component, or suspicious design decision visible in the diagram.
@@ -89,37 +129,74 @@ INTERVIEW_PROBLEMS = [
     {
         "brief": "Design a URL shortening service — something like bit.ly.",
         "full": "Design a URL shortener like bit.ly that handles 100 million URLs and 10 billion redirects per month.",
+        "category": "storage",
+        "difficulty": ["easy", "medium"],
     },
     {
         "brief": "Design a real-time messaging app.",
         "full": "Design a real-time chat system like WhatsApp that supports 500 million daily active users.",
+        "category": "realtime",
+        "difficulty": ["medium", "hard"],
     },
     {
         "brief": "Design a video upload and streaming platform.",
-        "full": "Design YouTube's video upload and streaming pipeline.",
+        "full": "Design YouTube's video upload and streaming pipeline — focus on upload, transcoding, and delivery at scale.",
+        "category": "storage",
+        "difficulty": ["medium", "hard"],
     },
     {
         "brief": "Design a distributed rate limiter.",
-        "full": "Design a distributed rate limiter that works across 50 data centers globally.",
+        "full": "Design a distributed rate limiter that works consistently across 50 data centers globally.",
+        "category": "distributed",
+        "difficulty": ["hard", "staff"],
     },
     {
         "brief": "Design a social media post fanout system.",
         "full": "Design Twitter's tweet fanout system — a user with 10 million followers posts a tweet.",
+        "category": "messaging",
+        "difficulty": ["hard", "staff"],
     },
     {
         "brief": "Design a ride-sharing service.",
-        "full": "Design a ride-sharing service like Uber — focus on matching, dispatch, and location tracking.",
+        "full": "Design a ride-sharing service like Uber — focus on matching, dispatch, and real-time location tracking.",
+        "category": "realtime",
+        "difficulty": ["medium", "hard"],
     },
     {
         "brief": "Design a large-scale web crawler.",
         "full": "Design a web crawler that indexes a billion pages in under a week.",
+        "category": "search",
+        "difficulty": ["hard", "staff"],
     },
     {
         "brief": "Design a push notification delivery system.",
-        "full": "Design a notification system that delivers 10 billion push notifications per day.",
+        "full": "Design a notification system that reliably delivers 10 billion push notifications per day.",
+        "category": "messaging",
+        "difficulty": ["easy", "medium"],
+    },
+    {
+        "brief": "Design a type-ahead search suggestion system.",
+        "full": "Design Google's autocomplete — type-ahead suggestions served in under 100ms for 2 billion daily searches.",
+        "category": "search",
+        "difficulty": ["easy", "medium", "hard"],
+    },
+    {
+        "brief": "Design a real-time ML feature store.",
+        "full": "Design an ML feature store that serves low-latency features for real-time model inference at 50,000 requests per second.",
+        "category": "ml",
+        "difficulty": ["hard", "staff"],
     },
 ]
 
 
-def pick_problem() -> dict:
-    return random.choice(INTERVIEW_PROBLEMS)
+def pick_problem(topic: str = "", difficulty: str = "") -> dict:
+    pool = INTERVIEW_PROBLEMS
+    if topic:
+        filtered = [p for p in pool if p.get("category") == topic]
+        if filtered:
+            pool = filtered
+    if difficulty:
+        filtered = [p for p in pool if difficulty in p.get("difficulty", [])]
+        if filtered:
+            pool = filtered
+    return random.choice(pool)

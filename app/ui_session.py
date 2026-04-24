@@ -8,7 +8,9 @@ TTS → base64 audio back to browser.
 
 import asyncio
 import base64
+import json
 import logging
+import re
 import time
 from typing import Optional
 
@@ -17,7 +19,9 @@ from openai import AsyncOpenAI
 
 from app.config import settings
 from app.prompts import (
+    DIFFICULTY_PROMPTS,
     PHASE_PROMPTS,
+    SCORECARD_PROMPT,
     SYSTEM_DESIGN_INTERVIEWER_PROMPT,
     pick_problem,
 )
@@ -63,10 +67,12 @@ class UISession:
         {"type": "error", "message": "..."}
     """
 
-    def __init__(self, session_id: str, ws: WebSocket) -> None:
+    def __init__(self, session_id: str, ws: WebSocket, topic: str = "", difficulty: str = "medium") -> None:
         self.session_id = session_id
         self.ws = ws
         self.is_active = True
+        self._topic = topic
+        self._difficulty = difficulty
 
         self._history: list[dict] = [
             {"role": "system", "content": SYSTEM_DESIGN_INTERVIEWER_PROMPT}
@@ -82,7 +88,9 @@ class UISession:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        self._problem = pick_problem()
+        self._problem = pick_problem(topic=self._topic, difficulty=self._difficulty)
+        if self._difficulty in DIFFICULTY_PROMPTS:
+            self._history.append({"role": "system", "content": DIFFICULTY_PROMPTS[self._difficulty]})
         self._history.append({"role": "system", "content": PHASE_PROMPTS[_PHASE_INTRO]})
         self._phase_start_at = time.monotonic()
 
@@ -95,6 +103,28 @@ class UISession:
 
     async def stop(self) -> None:
         self.is_active = False
+
+    # ------------------------------------------------------------------
+    # Score card
+    # ------------------------------------------------------------------
+
+    async def generate_scorecard(self) -> None:
+        await self._send({"type": "scorecard_loading"})
+        scorecard_msgs = self._history + [{"role": "system", "content": SCORECARD_PROMPT}]
+        try:
+            completion = await _openai.chat.completions.create(
+                model=settings.llm_model,
+                messages=scorecard_msgs,
+                max_tokens=500,
+                temperature=0.2,
+            )
+            raw = completion.choices[0].message.content.strip()
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            data = json.loads(m.group()) if m else {"summary": raw, "grade": "N/A", "hire": "N/A", "strengths": [], "gaps": [], "study": []}
+        except Exception as exc:
+            logger.error("[%s] Scorecard error: %s", self.session_id, exc)
+            data = {"error": "Could not generate scorecard. Please review the transcript manually."}
+        await self._send({"type": "scorecard", "data": data})
 
     # ------------------------------------------------------------------
     # Audio ingestion
@@ -257,8 +287,8 @@ class UISession:
 _ui_sessions: dict[str, "UISession"] = {}
 
 
-def create_ui_session(session_id: str, ws: WebSocket) -> UISession:
-    session = UISession(session_id, ws)
+def create_ui_session(session_id: str, ws: WebSocket, topic: str = "", difficulty: str = "medium") -> UISession:
+    session = UISession(session_id, ws, topic=topic, difficulty=difficulty)
     _ui_sessions[session_id] = session
     return session
 
