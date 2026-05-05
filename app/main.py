@@ -237,16 +237,17 @@ async def serve_ui():
 
 
 @app.websocket("/ws/interview")
-async def interview_websocket(websocket: WebSocket):
+async def interview_websocket(websocket: WebSocket, topic: str = "", difficulty: str = "medium"):
     """
     WebSocket endpoint for the browser UI interview session.
 
     Client sends:  {"type": "audio", "data": "<base64>", "mime": "audio/webm"}
-    Server sends:  {"type": "transcript"|"response"|"phase_change"|"session_started", ...}
+                   {"type": "end"}
+    Server sends:  {"type": "transcript"|"response"|"phase_change"|"session_started"|"scorecard_loading"|"scorecard", ...}
     """
     await websocket.accept()
     session_id = uuid.uuid4().hex[:8]
-    session = ui_runner.create_ui_session(session_id, websocket)
+    session = ui_runner.create_ui_session(session_id, websocket, topic=topic, difficulty=difficulty)
 
     try:
         await websocket.send_json({"type": "session_started", "session_id": session_id})
@@ -258,6 +259,8 @@ async def interview_websocket(websocket: WebSocket):
                 audio_bytes = base64.b64decode(data["data"])
                 mime = data.get("mime", "audio/webm")
                 asyncio.create_task(session.process_audio(audio_bytes, mime))
+            elif data.get("type") == "end":
+                asyncio.create_task(session.generate_scorecard())
 
     except WebSocketDisconnect:
         pass

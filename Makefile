@@ -1,4 +1,4 @@
-.PHONY: build run test test-watch lint clean
+.PHONY: build run test test-watch test-human report-human lint clean
 
 ## Build the production Docker image
 build:
@@ -17,6 +17,14 @@ test:
 test-watch:
 	docker compose -f docker-compose.test.yml run --rm test \
 		sh -c "pip install pytest-watch -q && ptw tests/ app/ -- -v"
+
+## Run human-likeness tests against the live LLM (requires Ollama running locally)
+test-human:
+	python -m pytest tests/test_human_likeness.py -v -s -p no:cov --tb=short
+
+## Generate a standalone human-likeness report (no pytest needed)
+report-human:
+	python tests/test_human_likeness.py
 
 ## Lint with ruff (if installed)
 lint:
