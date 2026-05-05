@@ -7,7 +7,7 @@ An AI interviewer that conducts structured, real-feeling system design interview
 | **Browser UI** | Open `http://localhost:8000/ui` — draw your design on a canvas and talk to Alex via mic |
 | **Video call bot** | Bot joins your Zoom / Google Meet, speaks via TTS, listens via transcription |
 
-Alex is a **Senior Staff Engineer** persona that runs a 4-phase interview: warm-up → constraint clarification → design → adversarial deep dive.
+Alex is a **Senior Staff Engineer** persona that runs a 4-phase interview: warm-up → constraint clarification → design → adversarial deep dive. At the end, it generates a structured performance scorecard.
 
 ---
 
@@ -31,13 +31,16 @@ Every session follows the same four phases, escalating naturally:
 - Runs the full 4-phase interview flow automatically
 - Speaks and responds in plain conversational English — no bullet points, no robotic phrasing
 - Asks one sharp, focused question at a time
+- Keeps the LLM context lean via **relevance-scored context prioritization** (see below)
 
 **Browser UI mode:**
+- Setup screen to pick **topic** (Storage / Distributed / Real-time / Messaging / Search / ML) and **difficulty** (Junior / Mid-level / Senior / Staff) before starting
 - Canvas with 13 draggable system design components (LB, Cache, DB, Queue, CDN, etc.)
 - Arrows between components with click-to-delete
 - Push-to-talk mic (hold button or hold Space bar)
 - Live transcript with slide-in message bubbles
 - Phase badge + animated transition banners
+- **End Interview** button generates a structured AI scorecard
 
 **Video call bot mode:**
 - Joins Zoom / Google Meet as a participant
@@ -45,6 +48,56 @@ Every session follows the same four phases, escalating naturally:
 - Listens via real-time Recall.ai transcription
 - Periodically analyses whiteboard screenshots and asks targeted questions
 - Speaks every response via Kokoro TTS
+
+---
+
+## Difficulty Levels
+
+The difficulty selector shifts Alex's entire behaviour, not just the problem complexity:
+
+| Level | Alex's style |
+|---|---|
+| **Junior** | Encouraging, hints freely, broad questions |
+| **Mid-level** | Balanced probing, moderate pressure |
+| **Senior** | Expects trade-off justifications, digs into bottlenecks |
+| **Staff** | Sharply adversarial — cost pressure, multi-region concerns, CAP theorems, failure cascades |
+
+---
+
+## Scorecard
+
+After clicking **End Interview**, the bot analyses the full conversation and produces a structured report:
+
+| Field | Description |
+|---|---|
+| **Grade** | A–F, colour-coded green / yellow / red |
+| **Hire recommendation** | Strong Yes / Yes / Lean No / No |
+| **Summary** | One-paragraph overall assessment |
+| **Strengths** | What the candidate did well |
+| **Gaps** | Specific weaknesses in the design |
+| **Study topics** | 2–3 targeted areas to review before the next interview |
+
+---
+
+## Context Prioritization
+
+Long interviews accumulate thousands of tokens of conversation history. Without management, the LLM slows down, loses focus, and starts re-asking questions the candidate already answered.
+
+Every turn, before the LLM call:
+1. Each past exchange is scored against the current user message using **cosine similarity over word-frequency vectors** — a fast in-process search over the conversation history.
+2. The highest-scoring chunks are kept; lower-scoring ones are dropped for this turn only.
+3. System messages and the 4 most recent turns are always kept regardless of score.
+
+**Result:** The active context stays at ~1,500 tokens per turn no matter how long the conversation runs. The full history is preserved in memory for scorecard generation.
+
+| Turn | Naive (full history) | With prioritization |
+|---|---|---|
+| 5 | ~400 tokens | ~400 tokens |
+| 15 | ~2,000 tokens | ~1,500 tokens |
+| 30 | ~5,000 tokens | ~1,500 tokens |
+| 45 | ~8,000 tokens | ~1,500 tokens |
+
+Scoring overhead: <2ms (pure Python, no network calls, no external dependencies).
 
 ---
 
@@ -194,12 +247,12 @@ curl http://localhost:8880/health
 http://localhost:8000/ui
 ```
 
-Open that URL after starting the stack. No setup beyond the `.env` above.
-
-- **Draw** your design by dragging components from the left sidebar onto the canvas
-- **Connect** components by clicking "Connect" in the toolbar, then clicking two nodes
-- **Talk** by holding the mic button (or holding the Space bar)
-- Alex hears you, responds with voice, and the phase indicator updates automatically
+1. **Setup screen** — choose a topic and difficulty, then click **Begin Interview**
+2. **Draw** your design by dragging components from the sidebar onto the canvas
+3. **Connect** components by clicking two nodes in sequence
+4. **Talk** by holding the mic button (or holding the Space bar)
+5. Alex hears you, responds with voice, and the phase indicator updates automatically
+6. Click **End Interview** to receive your scorecard
 
 ### Option B — Video call bot
 
@@ -240,7 +293,7 @@ All settings are read from `.env`. See `.env.example` for the full list.
 
 | Variable | Default | Description |
 |---|---|---|
-| `RECALL_API_KEY` | — | Recall.ai API key (required) |
+| `RECALL_API_KEY` | — | Recall.ai API key (required for video call bot) |
 | `NGROK_AUTHTOKEN` | — | ngrok auth token for stable tunnel URLs |
 | `WEBHOOK_BASE_URL` | `http://localhost:8000` | Public URL ngrok exposes — update after first run |
 | `BOT_PERSONA_NAME` | `System Design Interviewer` | Display name in the video call |
@@ -274,7 +327,7 @@ OPENAI_API_KEY=sk-...
 
 ## Running Tests
 
-Tests are fully mocked — no API keys needed.
+### Full suite (mocked — no API keys needed)
 
 ```bash
 make test
@@ -286,7 +339,31 @@ Or in watch mode (reruns on file change):
 make test-watch
 ```
 
-Current: **51 / 51 tests passing**.
+Current: **87 / 87 tests passing**.
+
+### Human-likeness tests (requires Ollama running locally)
+
+These make real LLM calls to verify Alex sounds like a human engineer, not a chatbot. Nine checks per scenario: no markdown, no robotic openers, correct length, ends with a question, no bullet lists, no meta-commentary, no enumeration, no all-caps words.
+
+```bash
+# Run as pytest with per-check detail
+make test-human
+
+# Generate a standalone formatted report (no pytest needed)
+make report-human
+```
+
+Example report output:
+```
+Score: 83% — 45/54 checks passed
+
+Perfect (6/6): no_robotic_opener, length_8_to_100, no_phase_meta, no_enumeration, no_all_caps
+Problem areas:
+  ends_with_question    ███░░░░░░░  2/6
+  one_or_two_questions  █████░░░░░  3/6
+  no_markdown           ████████░░  5/6
+  no_bullet_list        ████████░░  5/6
+```
 
 ---
 
@@ -323,21 +400,31 @@ Change voice by setting `TTS_VOICE` in `.env` and running `docker compose up -d`
 ```
 .
 ├── app/
-│   ├── main.py           # FastAPI routes — webhooks, /ui, /ws/interview
-│   ├── bot_runner.py     # Video call bot session — 4-phase flow, Recall.ai delivery
-│   ├── ui_session.py     # Browser UI session — same 4-phase flow, WebSocket delivery
-│   ├── recall_client.py  # Recall.ai API client
-│   ├── config.py         # Settings loaded from .env
-│   ├── prompts.py        # Persona, PHASE_PROMPTS, INTERVIEW_PROBLEMS
+│   ├── main.py              # FastAPI routes — webhooks, /ui, /ws/interview
+│   ├── bot_runner.py        # Video call bot session — 4-phase flow, Recall.ai delivery
+│   ├── ui_session.py        # Browser UI session — same 4-phase flow, WebSocket delivery
+│   ├── context_manager.py   # Context prioritization — cosine scoring, token budget
+│   ├── recall_client.py     # Recall.ai API client
+│   ├── config.py            # Settings loaded from .env
+│   ├── prompts.py           # Persona, PHASE_PROMPTS, DIFFICULTY_PROMPTS, INTERVIEW_PROBLEMS
 │   └── static/
-│       └── index.html    # Browser UI — canvas, audio chat, transcript
-├── tests/                # Pytest test suite (51 tests)
-├── docker-compose.yml    # App + Kokoro + ngrok
+│       └── index.html       # Browser UI — setup screen, canvas, audio chat, scorecard
+├── tests/
+│   ├── test_context_manager.py  # 36 offline unit tests for context prioritization
+│   ├── test_human_likeness.py   # Live LLM tests — 9 human-likeness checks × 6 scenarios
+│   ├── test_main.py
+│   ├── test_bot_runner.py
+│   ├── test_prompts.py
+│   ├── test_recall_client.py
+│   ├── test_config.py
+│   └── conftest.py
+├── docker-compose.yml
 ├── docker-compose.test.yml
 ├── Dockerfile
 ├── Dockerfile.test
-├── .env.example          # Template — copy to .env and fill in
-├── CHANGELOG.md          # Per-day change log
+├── Makefile
+├── .env.example             # Template — copy to .env and fill in
+├── CHANGELOG.md
 └── README.md
 ```
 
@@ -360,6 +447,10 @@ Change voice by setting `TTS_VOICE` in `.env` and running `docker compose up -d`
 - Ensure Ollama is running: `curl http://localhost:11434`
 - Confirm the model is pulled: `ollama list`
 - From inside Docker, Ollama is reachable at `host.docker.internal:11434`
+
+**Responses feel slow mid-interview**
+- Expected on weak hardware with large models — switch to `qwen2.5:1.5b-instruct` for faster responses
+- Context prioritization keeps the prompt lean (~1,500 tokens), so latency stays flat throughout the session regardless of conversation length
 
 **Webhook URL invalid**
 - Must use `docker compose up -d` (not `docker compose restart`) to reload `.env`

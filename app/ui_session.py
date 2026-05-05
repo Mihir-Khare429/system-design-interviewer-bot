@@ -18,6 +18,7 @@ from fastapi import WebSocket
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.context_manager import prioritize
 from app.prompts import (
     DIFFICULTY_PROMPTS,
     PHASE_PROMPTS,
@@ -233,10 +234,14 @@ class UISession:
 
     async def _generate(self, user_text: str) -> str:
         self._history.append({"role": "user", "content": user_text})
+        # Trim context to TOKEN_BUDGET using cosine-similarity scoring so the
+        # prompt stays lean regardless of conversation length. Full history is
+        # still preserved in self._history for scorecard generation.
+        active_ctx = prioritize(self._history[:-1], user_text) + [self._history[-1]]
         try:
             completion = await _openai.chat.completions.create(
                 model=settings.llm_model,
-                messages=self._history,
+                messages=active_ctx,
                 max_tokens=80,
                 temperature=0.85,
             )

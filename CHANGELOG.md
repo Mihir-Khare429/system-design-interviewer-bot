@@ -4,6 +4,58 @@ All notable changes to the System Design Interviewer Bot are documented here.
 
 ---
 
+## [2026-05-04] — Context Prioritization + Problem Picker + Scorecard
+
+### Added
+
+- **Context prioritization (`app/context_manager.py`)** — prevents prompt bloat during long interviews. Before each LLM call, every past exchange is scored against the current user message using cosine similarity over bag-of-words TF vectors. Only the highest-scoring messages are passed to the model; system messages and the last `RECENCY_ANCHOR` (4) turns are always kept regardless of score. The full `self._history` is never modified, so the complete transcript is still available for scorecard generation.
+  - Token budget: ~1,500 tokens per LLM call, flat across the entire interview.
+  - Scoring cost: <2ms pure Python — no external dependencies, no network calls.
+  - At turn 30+ this actively reduces latency vs. the naive full-history approach.
+
+- **Problem picker + difficulty selector** — setup screen shown before the interview starts. Two dropdowns let the user choose:
+  - *Topic* — Random / Storage / Distributed / Real-time / Messaging / Search / ML
+  - *Difficulty* — Junior / Mid-level / Senior / Staff
+  - Selection filters `INTERVIEW_PROBLEMS` in `prompts.py`; difficulty also injects a calibration system prompt that shifts Alex's behavior from encouraging (Junior) to sharply adversarial (Staff).
+
+- **`DIFFICULTY_PROMPTS`** dict in `prompts.py` — four named calibration strings (easy, medium, hard, staff) injected as a system message at session start, before the INTRO phase prompt.
+
+- **`pick_problem(topic, difficulty)`** — replaces `pick_question()`. Filters the problem pool by `category` and `difficulty` fields; falls back gracefully to the full pool if no match.
+
+- **Scorecard / feedback modal** — "End Interview" button sends `{"type": "end"}` over WebSocket. The server appends `SCORECARD_PROMPT` to the full conversation history and calls the LLM at `temperature=0.2, max_tokens=500`. JSON is extracted with a `re.DOTALL` regex. The modal shows:
+  - Grade box (A–F, color-coded green/yellow/red)
+  - Hire recommendation pill (Strong Yes / Yes / Lean No / No)
+  - One-paragraph summary
+  - Strengths / Gaps / Study topics sections
+
+- **`UISession.generate_scorecard()`** — sends `scorecard_loading` first, then `scorecard` with the parsed data (or an error message on parse failure).
+
+- **`SCORECARD_PROMPT`** in `prompts.py` — instructs the LLM to return a single JSON object with keys: `grade`, `hire`, `summary`, `strengths`, `gaps`, `study`.
+
+- **`tests/test_context_manager.py`** — 35 offline unit tests covering:
+  - `_tokenize`, `_term_freq`, `_cosine`, `_approx_tokens` helpers
+  - Short-conversation passthrough (no pruning when under budget)
+  - System messages always preserved and appearing first
+  - Recency anchor always preserved and appearing at the end
+  - Token budget respected on verbose 30-turn conversations
+  - Relevant messages prioritised over irrelevant ones
+  - Original message ordering preserved after scoring
+  - Edge cases: empty history, empty query, single-turn, immutability of input
+
+### Changed
+
+- **`UISession.__init__`** — now accepts `topic: str = ""` and `difficulty: str = "medium"` and stores them for use in `start()`.
+- **`UISession._generate()`** — calls `prioritize(self._history[:-1], user_text)` to build the active context before each LLM call. `self._history` is still the full transcript.
+- **`create_ui_session()`** — forwards `topic` and `difficulty` to `UISession`.
+- **`GET /ws/interview`** — FastAPI WebSocket handler reads `topic` and `difficulty` as query parameters.
+- **`app/static/index.html`** — setup screen replaces the previous auto-connect on page load. WebSocket connection is deferred until "Begin Interview" is clicked. Header now shows topic/difficulty badges (color-coded by difficulty level). Phase transitions announce themselves with a spring-animated banner.
+
+### Test results
+- All existing tests continue to pass.
+- 35 new tests added in `test_context_manager.py`.
+
+---
+
 ## [2026-04-24] — Structured Interview Flow + Browser UI
 
 ### Added
