@@ -57,7 +57,8 @@ class TestCreateBot:
         await client.create_bot("https://meet.google.com/abc")
         import json
         body = json.loads(route.calls.last.request.content)
-        assert "/api/webhook/transcription" in body["real_time_transcription"]["destination_url"]
+        endpoints = body["recording_config"]["realtime_endpoints"]
+        assert any("/api/webhook/transcription" in ep["url"] for ep in endpoints)
 
     @respx.mock
     async def test_includes_status_change_webhook_url(self, client):
@@ -166,26 +167,44 @@ class TestSendChatMessage:
             await client.send_chat_message("bot_abc123", "Hi")
 
 
-# ── play_media ────────────────────────────────────────────────────────────────
+# ── play_audio ────────────────────────────────────────────────────────────────
 
-class TestPlayMedia:
+class TestPlayAudio:
     @respx.mock
-    async def test_posts_audio_url(self, client):
-        route = respx.post(f"{RECALL_BASE_URL}/bot/bot_abc123/play_media").mock(
+    async def test_posts_to_output_audio_endpoint(self, client):
+        route = respx.post(f"{RECALL_BASE_URL}/bot/bot_abc123/output_audio").mock(
+            return_value=httpx.Response(200, json={"ok": True})
+        )
+        await client.play_audio("bot_abc123", b"fake mp3 data")
+        assert route.called
+
+    @respx.mock
+    async def test_sends_base64_encoded_audio(self, client):
+        import base64 as b64_mod, json as _json
+        route = respx.post(f"{RECALL_BASE_URL}/bot/bot_abc123/output_audio").mock(
             return_value=httpx.Response(200, json={})
         )
-        await client.play_media("bot_abc123", "https://example.com/audio.mp3")
-        import json
-        body = json.loads(route.calls.last.request.content)
-        assert body["url"] == "https://example.com/audio.mp3"
+        audio_bytes = b"raw mp3 bytes"
+        await client.play_audio("bot_abc123", audio_bytes)
+        body = _json.loads(route.calls.last.request.content)
+        assert body["kind"] == "mp3"
+        assert body["b64_data"] == b64_mod.b64encode(audio_bytes).decode()
+
+    @respx.mock
+    async def test_returns_response_json(self, client):
+        respx.post(f"{RECALL_BASE_URL}/bot/bot_abc123/output_audio").mock(
+            return_value=httpx.Response(200, json={"status": "playing"})
+        )
+        result = await client.play_audio("bot_abc123", b"audio")
+        assert result == {"status": "playing"}
 
     @respx.mock
     async def test_raises_on_api_error(self, client):
-        respx.post(f"{RECALL_BASE_URL}/bot/bot_abc123/play_media").mock(
-            return_value=httpx.Response(422, json={"detail": "Invalid URL"})
+        respx.post(f"{RECALL_BASE_URL}/bot/bot_abc123/output_audio").mock(
+            return_value=httpx.Response(422, json={"detail": "Invalid"})
         )
         with pytest.raises(httpx.HTTPStatusError):
-            await client.play_media("bot_abc123", "not-a-url")
+            await client.play_audio("bot_abc123", b"data")
 
 
 # ── get_screenshot ────────────────────────────────────────────────────────────

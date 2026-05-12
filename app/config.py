@@ -1,7 +1,10 @@
+from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    model_config = ConfigDict(env_file=".env", extra="ignore")
+
     recall_api_key: str = "your_recall_key_here"
     openai_api_key: str = "your_openai_key_here"
     port: int = 8000
@@ -16,10 +19,6 @@ class Settings(BaseSettings):
     # TTS backend (defaults to OpenAI; swap to Kokoro for free local TTS)
     tts_base_url: str = "https://api.openai.com/v1"
     tts_voice: str = "onyx"
-
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
 
 
 settings = Settings()

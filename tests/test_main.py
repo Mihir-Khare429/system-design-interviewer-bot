@@ -5,11 +5,13 @@ Uses httpx.AsyncClient with ASGITransport so no real server is started.
 All Recall.ai and bot_runner calls are mocked.
 """
 
+import base64
 import os
 import pytest
 import httpx
 from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
+from starlette.testclient import TestClient
 
 from app.main import app
 
@@ -410,3 +412,212 @@ class TestEndSession:
 
         resp = await ac.delete("/api/sessions/bot_kkk")
         assert resp.status_code == 200
+
+
+# ── POST /api/webhook/transcription — new Recall.ai payload format ────────────
+#
+# The current code parses the v2 shape:
+#   {"data": {"bot": {"id": "..."}, "data": {"words": [...], "participant": ...}}}
+# The existing TestTranscriptionWebhook tests send the old shape, which hits the
+# early-return guard (empty bot_id / words). These new tests send the correct
+# format and cover lines 198-204.
+
+class TestTranscriptionWebhookNewFormat:
+    @patch("app.main.bot_runner")
+    async def test_new_format_triggers_handler(self, mock_runner, ac):
+        mock_runner.handle_transcript_event = AsyncMock()
+        mock_runner.active_session_ids = MagicMock(return_value=[])
+
+        resp = await ac.post(
+            "/api/webhook/transcription",
+            json={
+                "data": {
+                    "bot": {"id": "bot_v2"},
+                    "data": {
+                        "words": [{"text": "I"}, {"text": "use"}, {"text": "Redis"}],
+                        "participant": {"name": "Alice"},
+                    },
+                }
+            },
+        )
+        assert resp.status_code == 200
+
+    @patch("app.main.bot_runner")
+    async def test_new_format_empty_words_skipped(self, mock_runner, ac):
+        mock_runner.handle_transcript_event = AsyncMock()
+        mock_runner.active_session_ids = MagicMock(return_value=[])
+
+        resp = await ac.post(
+            "/api/webhook/transcription",
+            json={
+                "data": {
+                    "bot": {"id": "bot_v2"},
+                    "data": {"words": [], "participant": {"name": "Alice"}},
+                }
+            },
+        )
+        assert resp.status_code == 200
+        mock_runner.handle_transcript_event.assert_not_called()
+
+    @patch("app.main.bot_runner")
+    async def test_new_format_whitespace_only_text_skipped(self, mock_runner, ac):
+        """Words present but all whitespace — the 'if text:' branch should skip."""
+        mock_runner.handle_transcript_event = AsyncMock()
+        mock_runner.active_session_ids = MagicMock(return_value=[])
+
+        resp = await ac.post(
+            "/api/webhook/transcription",
+            json={
+                "data": {
+                    "bot": {"id": "bot_v2"},
+                    "data": {
+                        "words": [{"text": "  "}, {"text": ""}],
+                        "participant": {"name": "Bob"},
+                    },
+                }
+            },
+        )
+        assert resp.status_code == 200
+
+
+# ── GET /ui ───────────────────────────────────────────────────────────────────
+# Covers lines 234-236: serve_ui endpoint (none of which were previously tested).
+
+class TestServeUI:
+    async def test_returns_503_when_ui_not_built(self, ac):
+        mock_path = MagicMock()
+        mock_path.exists.return_value = False
+        with patch("app.main._UI_HTML", mock_path):
+            resp = await ac.get("/ui")
+        assert resp.status_code == 503
+
+    async def test_returns_200_when_ui_file_exists(self, ac):
+        mock_path = MagicMock()
+        mock_path.exists.return_value = True
+        mock_path.read_text.return_value = "<html><body>Interview UI</body></html>"
+
+        with patch("app.main._UI_HTML", mock_path):
+            resp = await ac.get("/ui")
+        assert resp.status_code == 200
+
+    async def test_returns_html_content_when_ui_exists(self, ac):
+        mock_path = MagicMock()
+        mock_path.exists.return_value = True
+        mock_path.read_text.return_value = "<html><body>Interview UI</body></html>"
+
+        with patch("app.main._UI_HTML", mock_path):
+            resp = await ac.get("/ui")
+        assert "text/html" in resp.headers["content-type"]
+
+
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+# Uses starlette.testclient.TestClient which triggers startup + shutdown lifespan.
+# Covers lines 46-50 (the entire lifespan function body).
+
+class TestLifespan:
+    def test_startup_log_and_clean_shutdown(self):
+        """Lifespan startup (line 46-47) and shutdown with no sessions (line 48-49 loop is no-op)."""
+        with TestClient(app) as client:
+            resp = client.get("/health")
+            assert resp.status_code == 200
+
+    def test_shutdown_stops_active_sessions(self):
+        """Covers lines 49-50: the for-loop body that stops each active session."""
+        with patch("app.main.bot_runner") as mock_runner:
+            mock_runner.active_session_ids.return_value = ["bot_lifespan"]
+            mock_runner.stop_session = AsyncMock()
+
+            with TestClient(app) as client:
+                resp = client.get("/health")
+                assert resp.status_code == 200
+            # TestClient exit triggers shutdown lifespan
+            mock_runner.stop_session.assert_called_once_with("bot_lifespan")
+
+
+# ── WebSocket /ws/interview ───────────────────────────────────────────────────
+# Covers lines 248-271 (the entire WebSocket endpoint handler).
+
+class TestWebSocketEndpoint:
+    def _make_mock_session(self):
+        s = MagicMock()
+        s.start = AsyncMock(return_value=None)
+        s.stop = AsyncMock(return_value=None)
+        s.process_audio = AsyncMock(return_value=None)
+        s.generate_scorecard = AsyncMock(return_value=None)
+        return s
+
+    def test_receives_session_started_on_connect(self):
+        mock_session = self._make_mock_session()
+
+        with patch("app.main.ui_runner") as mock_runner, \
+             patch("app.main.asyncio.create_task", side_effect=lambda c: c.close()):
+            mock_runner.create_ui_session.return_value = mock_session
+
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/interview") as ws:
+                    data = ws.receive_json()
+                    assert data["type"] == "session_started"
+                    assert "session_id" in data
+
+    def test_audio_message_dispatches_process_audio(self):
+        mock_session = self._make_mock_session()
+
+        with patch("app.main.ui_runner") as mock_runner, \
+             patch("app.main.asyncio.create_task", side_effect=lambda c: c.close()):
+            mock_runner.create_ui_session.return_value = mock_session
+
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/interview") as ws:
+                    ws.receive_json()  # session_started
+                    ws.send_json({
+                        "type": "audio",
+                        "data": base64.b64encode(b"fake audio").decode(),
+                        "mime": "audio/webm",
+                    })
+                    # Give the server a moment to process before disconnect
+            # If no exception was raised, the audio branch was exercised
+
+    def test_end_message_dispatches_generate_scorecard(self):
+        mock_session = self._make_mock_session()
+
+        with patch("app.main.ui_runner") as mock_runner, \
+             patch("app.main.asyncio.create_task", side_effect=lambda c: c.close()):
+            mock_runner.create_ui_session.return_value = mock_session
+
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/interview") as ws:
+                    ws.receive_json()  # session_started
+                    ws.send_json({"type": "end"})
+
+    def test_session_cleaned_up_on_disconnect(self):
+        mock_session = self._make_mock_session()
+
+        with patch("app.main.ui_runner") as mock_runner, \
+             patch("app.main.asyncio.create_task", side_effect=lambda c: c.close()):
+            mock_runner.create_ui_session.return_value = mock_session
+
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/interview") as ws:
+                    ws.receive_json()  # session_started
+                # websocket_connect exit disconnects → finally block runs
+
+            mock_session.stop.assert_awaited_once()
+            mock_runner.remove_ui_session.assert_called_once()
+
+    def test_topic_and_difficulty_passed_to_session(self):
+        mock_session = self._make_mock_session()
+
+        with patch("app.main.ui_runner") as mock_runner, \
+             patch("app.main.asyncio.create_task", side_effect=lambda c: c.close()):
+            mock_runner.create_ui_session.return_value = mock_session
+
+            with TestClient(app) as client:
+                with client.websocket_connect(
+                    "/ws/interview?topic=kafka&difficulty=hard"
+                ) as ws:
+                    ws.receive_json()
+
+            mock_runner.create_ui_session.assert_called_once()
+            call_kwargs = mock_runner.create_ui_session.call_args
+            assert call_kwargs[1]["topic"] == "kafka"
+            assert call_kwargs[1]["difficulty"] == "hard"

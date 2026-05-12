@@ -9,15 +9,21 @@ import pytest
 from app.context_manager import (
     TOKEN_BUDGET,
     RECENCY_ANCHOR,
+    COSINE_WEIGHT,
+    RECENCY_WEIGHT,
+    _HAS_TIKTOKEN,
     _cosine,
     _term_freq,
     _tokenize,
     _approx_tokens,
+    _build_idf,
+    _tfidf_vec,
+    _make_exchanges,
     prioritize,
 )
 
 
-# ── Unit: _tokenize ────────────────────────────────────────────────────────────
+# ── _tokenize ──────────────────────────────────────────────────────────────────
 
 class TestTokenize:
     def test_lowercases_input(self):
@@ -41,10 +47,10 @@ class TestTokenize:
 
     def test_handles_numbers(self):
         tokens = _tokenize("500 million users daily")
-        assert "500" in tokens or "million" in tokens  # numbers parsed as tokens
+        assert "million" in tokens
 
 
-# ── Unit: _term_freq ───────────────────────────────────────────────────────────
+# ── _term_freq ─────────────────────────────────────────────────────────────────
 
 class TestTermFreq:
     def test_counts_occurrences(self):
@@ -60,7 +66,7 @@ class TestTermFreq:
         assert tf["database"] == 1
 
 
-# ── Unit: _cosine ──────────────────────────────────────────────────────────────
+# ── _cosine ────────────────────────────────────────────────────────────────────
 
 class TestCosine:
     def test_identical_vectors_return_one(self):
@@ -84,12 +90,12 @@ class TestCosine:
 
     def test_more_overlap_scores_higher(self):
         query = {"redis": 1.0, "cache": 1.0, "latency": 1.0}
-        high = {"redis": 1.0, "cache": 1.0, "latency": 1.0}
-        low  = {"sharding": 1.0}
+        high  = {"redis": 1.0, "cache": 1.0, "latency": 1.0}
+        low   = {"sharding": 1.0}
         assert _cosine(query, high) > _cosine(query, low)
 
 
-# ── Unit: _approx_tokens ──────────────────────────────────────────────────────
+# ── _approx_tokens ─────────────────────────────────────────────────────────────
 
 class TestApproxTokens:
     def test_non_empty_message_has_positive_token_count(self):
@@ -104,11 +110,151 @@ class TestApproxTokens:
 
     def test_longer_message_has_more_tokens(self):
         short = {"role": "user", "content": "Yes."}
-        long  = {"role": "user", "content": "I would use a distributed caching layer with Redis Cluster, partitioned by consistent hashing across twelve shards with two replicas each."}
+        long  = {"role": "user", "content": (
+            "I would use a distributed caching layer with Redis Cluster, "
+            "partitioned by consistent hashing across twelve shards with two replicas each."
+        )}
         assert _approx_tokens(long) > _approx_tokens(short)
 
+    def test_tiktoken_gives_reasonable_count(self):
+        # ~10 word sentence should be 10-20 tokens
+        msg = {"role": "user", "content": "design a distributed url shortener at scale"}
+        count = _approx_tokens(msg)
+        assert 8 <= count <= 30
 
-# ── Unit: prioritize — short conversation passthrough ─────────────────────────
+
+# ── _build_idf ─────────────────────────────────────────────────────────────────
+
+class TestBuildIdf:
+    def test_returns_dict_of_positive_floats(self):
+        messages = [
+            {"role": "user",      "content": "kafka latency sharding"},
+            {"role": "assistant", "content": "why kafka specifically"},
+        ]
+        idf = _build_idf(messages)
+        assert isinstance(idf, dict)
+        assert all(v > 0 for v in idf.values())
+
+    def test_rare_word_has_higher_idf_than_common_word(self):
+        # "system" appears in every message; "kafka" appears in only one
+        messages = [
+            {"role": "user",      "content": "design the system using kafka"},
+            {"role": "assistant", "content": "the system needs more detail"},
+            {"role": "user",      "content": "the system handles writes"},
+            {"role": "assistant", "content": "the system uses postgres"},
+        ]
+        idf = _build_idf(messages)
+        assert idf.get("kafka", 0) > idf.get("system", 0)
+
+    def test_word_in_every_message_has_lowest_idf(self):
+        messages = [{"role": "user", "content": "redis redis redis"} for _ in range(10)]
+        idf = _build_idf(messages)
+        # "redis" appears in all 10 — idf = log(11/11) + 1 = 1.0 (minimum)
+        assert idf.get("redis", 0) <= 1.05
+
+    def test_empty_messages_returns_empty(self):
+        assert _build_idf([]) == {}
+
+    def test_single_message_returns_non_empty(self):
+        messages = [{"role": "user", "content": "scale the database"}]
+        idf = _build_idf(messages)
+        assert len(idf) > 0
+
+    def test_all_idf_values_at_least_one(self):
+        # Smoothed IDF: log((N+1)/(df+1)) + 1 is always >= 1 when df <= N
+        messages = [
+            {"role": "user", "content": "redis cache latency"},
+            {"role": "user", "content": "redis database writes"},
+        ]
+        idf = _build_idf(messages)
+        assert all(v >= 1.0 for v in idf.values())
+
+
+# ── _tfidf_vec ─────────────────────────────────────────────────────────────────
+
+class TestTfidfVec:
+    def test_rare_word_weighs_more_than_common_word(self):
+        messages = [
+            {"role": "user",      "content": "design the system with kafka"},
+            {"role": "assistant", "content": "why the system needs kafka"},
+            {"role": "user",      "content": "the system design question"},
+            {"role": "assistant", "content": "the system handles this"},
+        ]
+        idf = _build_idf(messages)
+        vec = _tfidf_vec(["kafka", "system", "the"], idf)
+        # "kafka" is rare → higher tfidf; "the" is filtered by _tokenize anyway,
+        # but "system" appears in every message → lower weight than "kafka"
+        assert vec.get("kafka", 0) > vec.get("system", 0)
+
+    def test_empty_words_returns_empty(self):
+        idf = {"redis": 2.0}
+        assert _tfidf_vec([], idf) == {}
+
+    def test_unknown_word_uses_neutral_weight(self):
+        idf = {"redis": 3.0}
+        vec = _tfidf_vec(["unknownterm"], idf)
+        # Unknown words fall back to idf=1.0
+        assert vec.get("unknownterm") == 1.0
+
+
+# ── _make_exchanges ────────────────────────────────────────────────────────────
+
+class TestMakeExchanges:
+    def test_user_assistant_pairs_grouped_together(self):
+        msgs = [
+            {"role": "user",      "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user",      "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+        ]
+        exchanges = _make_exchanges(msgs)
+        assert len(exchanges) == 2
+        assert exchanges[0] == [msgs[0], msgs[1]]
+        assert exchanges[1] == [msgs[2], msgs[3]]
+
+    def test_odd_trailing_message_becomes_singleton(self):
+        msgs = [
+            {"role": "user",      "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user",      "content": "Q2"},  # no assistant reply yet
+        ]
+        exchanges = _make_exchanges(msgs)
+        assert len(exchanges) == 2
+        assert len(exchanges[1]) == 1
+        assert exchanges[1][0]["content"] == "Q2"
+
+    def test_empty_list_returns_empty(self):
+        assert _make_exchanges([]) == []
+
+    def test_single_message_becomes_singleton(self):
+        msgs = [{"role": "user", "content": "hello"}]
+        exchanges = _make_exchanges(msgs)
+        assert len(exchanges) == 1
+        assert len(exchanges[0]) == 1
+
+    def test_preserves_original_order(self):
+        msgs = [
+            {"role": "user",      "content": "first"},
+            {"role": "assistant", "content": "reply first"},
+            {"role": "user",      "content": "second"},
+            {"role": "assistant", "content": "reply second"},
+        ]
+        exchanges = _make_exchanges(msgs)
+        assert exchanges[0][0]["content"] == "first"
+        assert exchanges[1][0]["content"] == "second"
+
+    def test_flattening_exchanges_recovers_original(self):
+        msgs = [
+            {"role": "user",      "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user",      "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+        ]
+        flat = [m for ex in _make_exchanges(msgs) for m in ex]
+        assert flat == msgs
+
+
+# ── prioritize — short conversation passthrough ────────────────────────────────
 
 class TestPrioritizeShortConversation:
     def _make_history(self, n_turns):
@@ -120,24 +266,21 @@ class TestPrioritizeShortConversation:
 
     def test_short_conversation_is_returned_unchanged(self):
         history = self._make_history(3)
-        result = prioritize(history, "current question")
-        assert result == history
+        assert prioritize(history, "current question") == history
 
     def test_passthrough_at_recency_anchor_boundary(self):
         history = self._make_history(RECENCY_ANCHOR)
-        result = prioritize(history, "current question")
-        assert result == history
+        assert prioritize(history, "current question") == history
 
     def test_result_is_a_list(self):
         history = self._make_history(2)
         assert isinstance(prioritize(history, "x"), list)
 
 
-# ── Unit: prioritize — system messages always kept ────────────────────────────
+# ── prioritize — system messages always kept ───────────────────────────────────
 
 class TestSystemMessagesAlwaysKept:
     def _make_long_history(self):
-        """Build a conversation guaranteed to exceed TOKEN_BUDGET."""
         history = [
             {"role": "system", "content": "You are Alex. Be adversarial."},
             {"role": "system", "content": "Phase: DESIGN. Challenge every decision."},
@@ -156,29 +299,24 @@ class TestSystemMessagesAlwaysKept:
     def test_all_system_messages_are_preserved(self):
         history = self._make_long_history()
         result = prioritize(history, "tell me about your database choice")
-        system_msgs = [m for m in result if m["role"] == "system"]
-        assert len(system_msgs) == 3
+        assert len([m for m in result if m["role"] == "system"]) == 3
 
     def test_system_messages_appear_first(self):
         history = self._make_long_history()
         result = prioritize(history, "explain your caching strategy")
-        for i, msg in enumerate(result):
-            if msg["role"] != "system":
-                break
-        system_before = all(result[j]["role"] == "system" for j in range(i))
-        assert system_before
+        first_non_system = next(i for i, m in enumerate(result) if m["role"] != "system")
+        assert all(result[j]["role"] == "system" for j in range(first_non_system))
 
 
-# ── Unit: prioritize — recency anchor always kept ────────────────────────────
+# ── prioritize — recency anchor always kept ────────────────────────────────────
 
 class TestRecencyAnchorAlwaysKept:
     def _make_long_history(self, anchor_content="ANCHOR_MESSAGE"):
-        """Build a long history where the last RECENCY_ANCHOR messages have known content."""
         history = [{"role": "system", "content": "You are Alex."}]
         filler = "I want to use Redis for caching all the read-heavy endpoints."
         for _ in range(20):
-            history.append({"role": "user",     "content": filler})
-            history.append({"role": "assistant", "content": filler})
+            history.append({"role": "user",      "content": filler})
+            history.append({"role": "assistant",  "content": filler})
         for i in range(RECENCY_ANCHOR):
             role = "user" if i % 2 == 0 else "assistant"
             history.append({"role": role, "content": f"{anchor_content} {i}"})
@@ -200,7 +338,7 @@ class TestRecencyAnchorAlwaysKept:
             assert msg["content"] == f"ANCHOR_MESSAGE {i}"
 
 
-# ── Unit: prioritize — token budget respected ────────────────────────────────
+# ── prioritize — token budget respected ───────────────────────────────────────
 
 class TestTokenBudget:
     def _verbose_history(self, n_turns=30):
@@ -217,8 +355,7 @@ class TestTokenBudget:
         history = self._verbose_history(30)
         result = prioritize(history, "how does your caching layer work?")
         total_tokens = sum(_approx_tokens(m) for m in result)
-        # Allow a small overrun due to the approximation rounding
-        assert total_tokens <= TOKEN_BUDGET + 50
+        assert total_tokens <= TOKEN_BUDGET + 50  # small slack for per-message overhead rounding
 
     def test_pruning_actually_reduces_message_count(self):
         history = self._verbose_history(30)
@@ -231,73 +368,177 @@ class TestTokenBudget:
         assert len(result) <= len(history)
 
 
-# ── Unit: prioritize — relevance ordering ────────────────────────────────────
+# ── prioritize — exchange-level pairing ───────────────────────────────────────
 
-class TestRelevanceOrdering:
-    def _history_with_known_relevant(self):
+class TestExchangeLevelChunking:
+    def _long_history_with_marker_exchange(self):
         """
-        Build a long history where two messages are clearly relevant to the
-        query ('kafka' + 'queue') and the rest are about unrelated topics.
+        Build a long verbose history. The very last pool exchange (before the
+        anchor) contains a uniquely identifiable user question and assistant
+        answer. Verify they are either both in or both out of the result.
         """
-        history = [{"role": "system", "content": "Interview context."}]
-        fillers = [
-            "I would shard the PostgreSQL database by user ID.",
-            "The CDN caches static assets at the edge.",
-            "Redis handles session storage with a 30 minute TTL.",
-            "The load balancer does round-robin with health checks.",
-            "Object storage holds user-uploaded media files.",
-        ]
-        for filler in fillers * 6:  # 30 unrelated turns
+        history = [{"role": "system", "content": "You are Alex."}]
+        filler = ("I would shard the PostgreSQL database by user ID to distribute "
+                  "load evenly and add read replicas for the query path. " * 3)
+        for _ in range(15):
             history.append({"role": "user",      "content": filler})
             history.append({"role": "assistant",  "content": filler})
+        # Marker exchange — placed so it ends up in the pool
+        history.append({"role": "user",      "content": "MARKER_QUESTION about kafka streams"})
+        history.append({"role": "assistant",  "content": "MARKER_ANSWER about kafka streams"})
+        # Anchor (last RECENCY_ANCHOR messages)
+        for i in range(RECENCY_ANCHOR):
+            role = "user" if i % 2 == 0 else "assistant"
+            history.append({"role": role, "content": f"anchor {i}"})
+        return history
 
-        # These two turns are highly relevant to our query
-        relevant_user = "For async jobs I would use a Kafka topic partitioned by event type."
-        relevant_alex = "Kafka adds operational overhead. Why not SQS or a simpler message queue?"
-        history.append({"role": "user",      "content": relevant_user})
-        history.append({"role": "assistant",  "content": relevant_alex})
-
-        return history, relevant_user, relevant_alex
-
-    def test_relevant_messages_are_included(self):
-        history, rel_user, rel_alex = self._history_with_known_relevant()
-        result = prioritize(history, "Should I use Kafka or a simpler queue for the async pipeline?")
+    def test_exchange_pair_never_split(self):
+        history = self._long_history_with_marker_exchange()
+        result = prioritize(history, "kafka streams processing")
         contents = [m["content"] for m in result]
-        assert rel_user in contents or rel_alex in contents
+        question_in = "MARKER_QUESTION about kafka streams" in contents
+        answer_in   = "MARKER_ANSWER about kafka streams" in contents
+        # The pair must be kept together or dropped together
+        assert question_in == answer_in
 
-    def test_result_preserves_original_message_order(self):
-        history, _, _ = self._history_with_known_relevant()
-        result = prioritize(history, "kafka queue message broker")
-        non_system = [m for m in result if m["role"] != "system"]
-        # Use object identity (id) to find each message's original position,
-        # avoiding false matches on duplicate content strings.
-        id_to_idx = {id(m): i for i, m in enumerate(history)}
-        indices = [id_to_idx[id(m)] for m in non_system if id(m) in id_to_idx]
-        assert indices == sorted(indices)
+    def test_relevant_exchange_pair_both_present(self):
+        history = self._long_history_with_marker_exchange()
+        # Query directly about kafka — the marker exchange should score high enough to keep
+        result = prioritize(history, "kafka streams processing pipeline")
+        contents = [m["content"] for m in result]
+        assert "MARKER_QUESTION about kafka streams" in contents
+        assert "MARKER_ANSWER about kafka streams" in contents
 
 
-# ── Unit: prioritize — edge cases ────────────────────────────────────────────
+# ── prioritize — recency-decay blending ───────────────────────────────────────
+
+class TestRecencyBlending:
+    def test_recent_exchange_beats_older_identical_exchange(self):
+        """
+        Two exchanges with identical content have the same cosine similarity score.
+        The recency component must break the tie in favour of the more recent one.
+
+        We use a budget tight enough to force exactly one exchange from the pool,
+        then verify via object identity that it's the newer exchange, not the older.
+        """
+        history = [{"role": "system", "content": "You are Alex."}]
+        identical = "sharding consistent hashing replication factor"
+
+        # 6 filler exchanges, then older identical exchange, then 2 more fillers,
+        # then newer identical exchange, then anchor.
+        for _ in range(6):
+            history.append({"role": "user",      "content": "unrelated filler about load balancer"})
+            history.append({"role": "assistant",  "content": "unrelated filler about load balancer"})
+
+        older_q = {"role": "user",      "content": identical}
+        older_a = {"role": "assistant",  "content": identical}
+        history.append(older_q)
+        history.append(older_a)
+
+        for _ in range(2):
+            history.append({"role": "user",      "content": "unrelated filler about load balancer"})
+            history.append({"role": "assistant",  "content": "unrelated filler about load balancer"})
+
+        newer_q = {"role": "user",      "content": identical}
+        newer_a = {"role": "assistant",  "content": identical}
+        history.append(newer_q)
+        history.append(newer_a)
+
+        # Anchor
+        for i in range(RECENCY_ANCHOR):
+            history.append({"role": "user" if i % 2 == 0 else "assistant", "content": f"anchor {i}"})
+
+        # Set budget tight enough that only ONE identical exchange fits.
+        # Calculate the actual fixed costs so this test works whether tiktoken is
+        # installed (accurate counts) or not (word-count heuristic fallback).
+        from app import context_manager as cm
+
+        system_tok = _approx_tokens({"role": "system", "content": "You are Alex."})
+        anchor_tok = sum(
+            _approx_tokens({
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"anchor {i}",
+            })
+            for i in range(RECENCY_ANCHOR)
+        )
+        exchange_tok = _approx_tokens(older_q) + _approx_tokens(older_a)
+        # Budget = fixed + one exchange + 2-token slack.
+        # fixed + one_exchange + 2 < fixed + 2 * one_exchange  (always true when exchange_tok > 2)
+        tight_budget = system_tok + anchor_tok + exchange_tok + 2
+
+        original_budget = cm.TOKEN_BUDGET
+        try:
+            cm.TOKEN_BUDGET = tight_budget
+            result = prioritize(history, "sharding consistent hashing")
+        finally:
+            cm.TOKEN_BUDGET = original_budget
+
+        result_ids = {id(m) for m in result}
+
+        # Exactly one of the two identical exchanges should appear
+        older_in = id(older_q) in result_ids and id(older_a) in result_ids
+        newer_in = id(newer_q) in result_ids and id(newer_a) in result_ids
+
+        # They should not both be present (budget is too tight)
+        assert not (older_in and newer_in), "Budget should have forced a choice between the two"
+        # The newer exchange must be the one selected
+        assert newer_in, "Recency blending should have selected the more recent exchange"
+
+    def test_recency_and_cosine_weights_sum_to_one(self):
+        assert math.isclose(COSINE_WEIGHT + RECENCY_WEIGHT, 1.0, abs_tol=1e-9)
+
+
+# ── prioritize — TF-IDF signal improvement ────────────────────────────────────
+
+class TestTfidfSignal:
+    def test_domain_specific_term_scores_higher_than_filler(self):
+        """
+        An exchange mentioning 'kafka' in a corpus where 'kafka' is rare should
+        score higher than an exchange full of common filler words, when the query
+        is about kafka — even if the filler exchange is longer.
+        """
+        history = [{"role": "system", "content": "You are Alex."}]
+        filler_msg = ("I would use the system with the design and the data and "
+                      "the service to handle the load and the requests and the users "
+                      "and the scale in the way that works for the architecture. " * 3)
+        kafka_msg = "I would use kafka for async event streaming between services."
+
+        for _ in range(8):
+            history.append({"role": "user",      "content": filler_msg})
+            history.append({"role": "assistant",  "content": filler_msg})
+        history.append({"role": "user",      "content": kafka_msg})
+        history.append({"role": "assistant",  "content": "Good. Why kafka over a simpler queue?"})
+        for _ in range(4):
+            history.append({"role": "user",      "content": filler_msg})
+            history.append({"role": "assistant",  "content": filler_msg})
+        # Anchor
+        for i in range(RECENCY_ANCHOR):
+            history.append({"role": "user" if i % 2 == 0 else "assistant", "content": f"anchor {i}"})
+
+        result = prioritize(history, "tell me more about your kafka decision")
+        contents = [m["content"] for m in result]
+        assert kafka_msg in contents
+
+
+# ── prioritize — edge cases ────────────────────────────────────────────────────
 
 class TestEdgeCases:
     def test_empty_history_returns_empty(self):
-        result = prioritize([], "some query")
-        assert result == []
+        assert prioritize([], "some query") == []
 
     def test_only_system_messages_returned_unchanged(self):
         history = [
             {"role": "system", "content": "Instruction A"},
             {"role": "system", "content": "Instruction B"},
         ]
-        result = prioritize(history, "any query")
-        assert result == history
+        assert prioritize(history, "any query") == history
 
     def test_empty_query_does_not_raise(self):
         history = [{"role": "system", "content": "x"}]
         for _ in range(5):
-            history.append({"role": "user", "content": "hello"})
-            history.append({"role": "assistant", "content": "hi"})
-        result = prioritize(history, "")
-        assert isinstance(result, list)
+            history.append({"role": "user",      "content": "hello"})
+            history.append({"role": "assistant",  "content": "hi"})
+        assert isinstance(prioritize(history, ""), list)
 
     def test_does_not_mutate_original_history(self):
         history = [{"role": "system", "content": "You are Alex."}]
@@ -309,14 +550,12 @@ class TestEdgeCases:
         assert len(history) == original_len
 
     def test_current_user_text_not_duplicated_in_result(self):
-        """prioritize() receives history WITHOUT the current turn — verify no duplication."""
         history = [{"role": "system", "content": "You are Alex."}]
         query = "What hash function should I use?"
         for i in range(10):
             history.append({"role": "user",      "content": f"question {i}"})
             history.append({"role": "assistant",  "content": f"answer {i}"})
         result = prioritize(history, query)
-        # The query itself should NOT appear in result (caller appends it separately)
         assert not any(m.get("content") == query for m in result)
 
     def test_single_turn_history_is_returned_unchanged(self):
@@ -326,3 +565,53 @@ class TestEdgeCases:
             {"role": "assistant", "content": "Hello"},
         ]
         assert prioritize(history, "some query") == history
+
+    def test_result_preserves_original_message_order(self):
+        history = [{"role": "system", "content": "Interview context."}]
+        fillers = [
+            "I would shard the PostgreSQL database by user ID.",
+            "The CDN caches static assets at the edge.",
+            "Redis handles session storage with a 30 minute TTL.",
+            "The load balancer does round-robin with health checks.",
+            "Object storage holds user-uploaded media files.",
+        ]
+        for filler in fillers * 6:
+            history.append({"role": "user",      "content": filler})
+            history.append({"role": "assistant",  "content": filler})
+        relevant_user = "For async jobs I would use a Kafka topic partitioned by event type."
+        relevant_alex = "Kafka adds operational overhead. Why not SQS or a simpler message queue?"
+        history.append({"role": "user",      "content": relevant_user})
+        history.append({"role": "assistant",  "content": relevant_alex})
+
+        result = prioritize(history, "kafka queue message broker")
+        non_system = [m for m in result if m["role"] != "system"]
+        id_to_idx = {id(m): i for i, m in enumerate(history)}
+        indices = [id_to_idx[id(m)] for m in non_system if id(m) in id_to_idx]
+        assert indices == sorted(indices)
+
+
+# ── tiktoken-specific ─────────────────────────────────────────────────────────
+
+class TestTiktokenIntegration:
+    def test_has_tiktoken_flag_is_bool(self):
+        assert isinstance(_HAS_TIKTOKEN, bool)
+
+    @pytest.mark.skipif(not _HAS_TIKTOKEN, reason="tiktoken not installed")
+    def test_token_count_plausible_for_sentence(self):
+        msg = {"role": "user", "content": "design a distributed URL shortener that handles 100k writes per second"}
+        count = _approx_tokens(msg)
+        # GPT tokenizer: ~15 words → ~18 tokens + 4 overhead = ~22. Allow wide range.
+        assert 10 <= count <= 35
+
+    @pytest.mark.skipif(not _HAS_TIKTOKEN, reason="tiktoken not installed")
+    def test_budget_respected_with_exact_token_counts(self):
+        history = [{"role": "system", "content": "You are Alex, a staff engineer."}]
+        msg = ("I would build the service with a consistent hashing ring of "
+               "256 virtual nodes distributed across 8 physical shards. "
+               "Each shard has a primary and two async replicas.")
+        for _ in range(30):
+            history.append({"role": "user",      "content": msg})
+            history.append({"role": "assistant",  "content": msg})
+        result = prioritize(history, "explain your replication strategy")
+        total = sum(_approx_tokens(m) for m in result)
+        assert total <= TOKEN_BUDGET + 20
