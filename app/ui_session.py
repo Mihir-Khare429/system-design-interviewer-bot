@@ -2,8 +2,15 @@
 UISession — WebSocket-based interview session for the browser UI.
 
 Same 4-phase logic as InterviewSession (bot_runner.py) but transport is a
-WebSocket instead of Recall.ai. Audio flows: browser mic → Whisper → LLM →
-TTS → base64 audio back to browser.
+WebSocket instead of Recall.ai.
+
+Audio pipeline (streaming path):
+  browser mic → Whisper STT → LLM token stream → sentence chunker
+  → TTS per sentence → base64 audio frame → browser speaker
+
+Barge-in: when the user starts speaking while the bot is mid-utterance,
+  the ongoing LLM stream is aborted between sentence boundaries and an
+  {"type": "interrupt"} frame is sent so the browser can stop playback.
 """
 
 import asyncio
@@ -13,6 +20,8 @@ import logging
 import re
 import time
 from typing import Optional
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 from fastapi import WebSocket
 from openai import AsyncOpenAI
@@ -41,6 +50,14 @@ _tts_client = AsyncOpenAI(
     api_key=settings.openai_api_key,
     base_url=settings.tts_base_url,
 )
+
+def _sentence_chunks(buf: str) -> tuple[list[str], str]:
+    """Split *buf* on sentence boundaries; return (complete_sentences, remainder)."""
+    parts = _SENTENCE_END.split(buf)
+    if len(parts) <= 1:
+        return [], buf
+    return parts[:-1], parts[-1]
+
 
 _PHASE_INTRO = "INTRO"
 _PHASE_CONSTRAINTS = "CONSTRAINTS"
@@ -83,6 +100,8 @@ class UISession:
         self._intro_exchanges: int = 0
         self._problem: Optional[dict] = None
         self._lock = asyncio.Lock()  # serialise audio processing
+        self._barge_in = asyncio.Event()
+        self._speaking: bool = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -134,19 +153,30 @@ class UISession:
     async def process_audio(self, audio_bytes: bytes, mime_type: str = "audio/webm") -> None:
         if not self.is_active:
             return
+        if self._speaking:
+            self._barge_in.set()
+            await self._send({"type": "interrupt"})
         async with self._lock:
-            transcript = await self._transcribe(audio_bytes, mime_type)
-            if not transcript:
-                return
+            self._barge_in.clear()
+            self._speaking = True
+            try:
+                transcript = await self._transcribe(audio_bytes, mime_type)
+                if not transcript:
+                    return
 
-            await self._send({"type": "transcript", "text": transcript})
+                await self._send({"type": "transcript", "text": transcript})
 
-            if self._phase == _PHASE_INTRO:
-                self._intro_exchanges += 1
+                if self._phase == _PHASE_INTRO:
+                    self._intro_exchanges += 1
 
-            response = await self._generate(transcript)
-            await self._respond(response)
-            await self._check_phase_transition()
+                if settings.llm_streaming:
+                    await self._stream_generate(transcript)
+                else:
+                    response = await self._generate(transcript)
+                    await self._respond(response)
+                await self._check_phase_transition()
+            finally:
+                self._speaking = False
 
     # ------------------------------------------------------------------
     # Phase management
@@ -231,6 +261,43 @@ class UISession:
         except Exception as exc:
             logger.error("[%s] Transcription error: %s", self.session_id, exc)
             return None
+
+    async def _stream_generate(self, user_text: str) -> None:
+        """Stream LLM tokens, deliver TTS per completed sentence, abort on barge-in."""
+        self._history.append({"role": "user", "content": user_text})
+        active_ctx = prioritize(self._history[:-1], user_text) + [self._history[-1]]
+        full_reply = ""
+        buf = ""
+        try:
+            stream = await _openai.chat.completions.create(
+                model=settings.llm_model,
+                messages=active_ctx,
+                max_tokens=80,
+                temperature=0.85,
+                stream=True,
+            )
+            async for chunk in stream:
+                if self._barge_in.is_set():
+                    logger.info("[%s] Barge-in: aborting generation.", self.session_id)
+                    break
+                delta = chunk.choices[0].delta.content or ""
+                full_reply += delta
+                buf += delta
+                sentences, buf = _sentence_chunks(buf)
+                for sent in sentences:
+                    if not self._barge_in.is_set():
+                        self._speaking = True
+                        await self._respond(sent)
+            if buf.strip() and not self._barge_in.is_set():
+                self._speaking = True
+                await self._respond(buf.strip())
+        except Exception as exc:
+            logger.error("[%s] Streaming LLM error: %s", self.session_id, exc)
+            if not self._barge_in.is_set():
+                await self._respond("Could you elaborate on that?")
+        if full_reply:
+            self._history.append({"role": "assistant", "content": full_reply})
+            logger.info("[%s] Response (streamed): %s", self.session_id, full_reply)
 
     async def _generate(self, user_text: str) -> str:
         self._history.append({"role": "user", "content": user_text})

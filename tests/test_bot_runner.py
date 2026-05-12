@@ -70,7 +70,7 @@ class TestInterviewSessionInit:
 # ── InterviewSession — push_transcript ───────────────────────────────────────
 
 class TestPushTranscript:
-    def test_appends_text_to_buffer_for_human_speaker(self):
+    async def test_appends_text_to_buffer_for_human_speaker(self):
         s = InterviewSession("bot_002")
         s.push_transcript("Hello world", "Alice")
         assert "Hello world" in s._transcript_buffer
@@ -91,13 +91,13 @@ class TestPushTranscript:
         s.push_transcript("Hello", "Alice")
         assert s._transcript_buffer == []
 
-    def test_multiple_pushes_accumulate(self):
+    async def test_multiple_pushes_accumulate(self):
         s = InterviewSession("bot_002")
         s.push_transcript("First", "Alice")
         s.push_transcript("Second", "Alice")
         assert len(s._transcript_buffer) == 2
 
-    def test_cancels_existing_flush_handle(self):
+    async def test_cancels_existing_flush_handle(self):
         s = InterviewSession("bot_002")
         mock_handle = MagicMock()
         s._flush_handle = mock_handle

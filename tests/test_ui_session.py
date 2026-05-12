@@ -16,6 +16,7 @@ from app.ui_session import (
     create_ui_session,
     remove_ui_session,
     _ui_sessions,
+    _sentence_chunks,
     INTRO_MAX_EXCHANGES,
     CONSTRAINTS_DURATION_S,
     DESIGN_DURATION_S,
@@ -24,6 +25,29 @@ from app.ui_session import (
     _PHASE_DESIGN,
     _PHASE_DEEP_DIVE,
 )
+
+
+# ── async iterator helper for mocking streaming responses ─────────────────────
+
+class _AsyncChunks:
+    """Minimal async iterator for mocking `async for chunk in stream`."""
+    def __init__(self, items):
+        self._iter = iter(items)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+def _make_chunk(text):
+    chunk = MagicMock()
+    chunk.choices[0].delta.content = text
+    return chunk
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -546,3 +570,133 @@ class TestSessionRegistry:
 
     def test_remove_nonexistent_session_does_not_raise(self):
         remove_ui_session("does_not_exist_xyz")
+
+
+# ── _sentence_chunks ──────────────────────────────────────────────────────────
+
+class TestSentenceChunks:
+    def test_splits_on_period(self):
+        sentences, remainder = _sentence_chunks("Hello. World.")
+        assert sentences == ["Hello."]
+        assert remainder == "World."
+
+    def test_splits_on_question_mark(self):
+        sentences, remainder = _sentence_chunks("How are you? I am fine.")
+        assert sentences == ["How are you?"]
+        assert remainder == "I am fine."
+
+    def test_no_sentence_boundary_returns_empty_list(self):
+        sentences, remainder = _sentence_chunks("No boundary here")
+        assert sentences == []
+        assert remainder == "No boundary here"
+
+    def test_multiple_sentences(self):
+        sentences, remainder = _sentence_chunks("One. Two. Three")
+        assert sentences == ["One.", "Two."]
+        assert remainder == "Three"
+
+    def test_empty_string(self):
+        sentences, remainder = _sentence_chunks("")
+        assert sentences == []
+        assert remainder == ""
+
+
+# ── _stream_generate ──────────────────────────────────────────────────────────
+
+class TestStreamGenerate:
+    async def test_calls_respond_for_each_sentence(self, session):
+        chunks = [_make_chunk("Hello. "), _make_chunk("How are you? ")]
+        with patch("app.ui_session._openai") as mock_openai, \
+             patch.object(session, "_respond", new_callable=AsyncMock) as mock_respond:
+            mock_openai.chat.completions.create = AsyncMock(
+                return_value=_AsyncChunks(chunks)
+            )
+            await session._stream_generate("Test input")
+        assert mock_respond.call_count == 2
+
+    async def test_appends_user_message_to_history(self, session):
+        chunks = [_make_chunk("Short reply.")]
+        with patch("app.ui_session._openai") as mock_openai, \
+             patch.object(session, "_respond", new_callable=AsyncMock):
+            mock_openai.chat.completions.create = AsyncMock(
+                return_value=_AsyncChunks(chunks)
+            )
+            await session._stream_generate("My question")
+        user_msgs = [m for m in session._history if m["role"] == "user"]
+        assert any(m["content"] == "My question" for m in user_msgs)
+
+    async def test_appends_assistant_reply_to_history(self, session):
+        chunks = [_make_chunk("Short reply.")]
+        with patch("app.ui_session._openai") as mock_openai, \
+             patch.object(session, "_respond", new_callable=AsyncMock):
+            mock_openai.chat.completions.create = AsyncMock(
+                return_value=_AsyncChunks(chunks)
+            )
+            await session._stream_generate("My question")
+        asst_msgs = [m for m in session._history if m["role"] == "assistant"]
+        assert any("Short reply." in m["content"] for m in asst_msgs)
+
+    async def test_aborts_on_barge_in(self, session):
+        session._barge_in.set()
+        chunks = [_make_chunk("Hello.")]
+        with patch("app.ui_session._openai") as mock_openai, \
+             patch.object(session, "_respond", new_callable=AsyncMock) as mock_respond:
+            mock_openai.chat.completions.create = AsyncMock(
+                return_value=_AsyncChunks(chunks)
+            )
+            await session._stream_generate("Test input")
+        mock_respond.assert_not_called()
+
+    async def test_falls_back_on_llm_error(self, session):
+        with patch("app.ui_session._openai") as mock_openai, \
+             patch.object(session, "_respond", new_callable=AsyncMock) as mock_respond:
+            mock_openai.chat.completions.create = AsyncMock(
+                side_effect=Exception("LLM down")
+            )
+            await session._stream_generate("Test")
+        mock_respond.assert_called_once_with("Could you elaborate on that?")
+
+    async def test_handles_none_delta_content(self, session):
+        chunk = MagicMock()
+        chunk.choices[0].delta.content = None
+        with patch("app.ui_session._openai") as mock_openai, \
+             patch.object(session, "_respond", new_callable=AsyncMock) as mock_respond:
+            mock_openai.chat.completions.create = AsyncMock(
+                return_value=_AsyncChunks([chunk])
+            )
+            await session._stream_generate("Test input")
+        mock_respond.assert_not_called()
+
+
+# ── barge-in behavior ─────────────────────────────────────────────────────────
+
+class TestBargIn:
+    async def test_sends_interrupt_when_already_speaking(self, session, mock_ws):
+        session._speaking = True
+        with patch.object(session, "_transcribe", new_callable=AsyncMock, return_value=None):
+            await session.process_audio(b"audio", "audio/webm")
+        sent = [c[0][0] for c in mock_ws.send_json.call_args_list]
+        assert any(m.get("type") == "interrupt" for m in sent)
+
+    async def test_clears_barge_in_after_lock(self, session):
+        session._speaking = True
+        with patch.object(session, "_transcribe", new_callable=AsyncMock, return_value=None):
+            await session.process_audio(b"audio", "audio/webm")
+        assert not session._barge_in.is_set()
+
+    async def test_speaking_reset_after_process_audio(self, session):
+        with patch.object(session, "_transcribe", new_callable=AsyncMock, return_value="Hi"), \
+             patch.object(session, "_generate", new_callable=AsyncMock, return_value="OK"), \
+             patch.object(session, "_respond", new_callable=AsyncMock), \
+             patch.object(session, "_check_phase_transition", new_callable=AsyncMock):
+            await session.process_audio(b"audio", "audio/webm")
+        assert session._speaking is False
+
+    async def test_speaking_reset_even_on_error(self, session):
+        with patch.object(session, "_transcribe", new_callable=AsyncMock,
+                          side_effect=Exception("STT down")):
+            try:
+                await session.process_audio(b"audio", "audio/webm")
+            except Exception:
+                pass
+        assert session._speaking is False

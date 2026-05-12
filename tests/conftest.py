@@ -11,6 +11,7 @@ os.environ.setdefault("RECALL_API_KEY", "test_recall_key")
 os.environ.setdefault("OPENAI_API_KEY", "test_openai_key")
 os.environ.setdefault("WEBHOOK_BASE_URL", "https://test.ngrok-free.app")
 os.environ.setdefault("BOT_PERSONA_NAME", "System Design Interviewer")
+os.environ.setdefault("LLM_STREAMING", "false")  # use batch mode by default in tests
 
 
 @pytest.fixture(autouse=True)

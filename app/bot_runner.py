@@ -17,9 +17,19 @@ import asyncio
 import base64
 import logging
 import os
+import re
 import secrets
 import time
 from typing import Optional
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def _sentence_chunks(buf: str) -> tuple[list[str], str]:
+    parts = _SENTENCE_END.split(buf)
+    if len(parts) <= 1:
+        return [], buf
+    return parts[:-1], parts[-1]
 
 from openai import AsyncOpenAI
 
@@ -102,6 +112,7 @@ class InterviewSession:
         self._intro_exchanges: int = 0
         self._problem: Optional[dict] = None
         self._whiteboard_url: str = ""
+        self._barge_in: bool = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -152,10 +163,15 @@ class InterviewSession:
         logger.info("[%s] ← %s: %s", self.bot_id, speaker, text)
         self._transcript_buffer.append(text)
 
+        now = time.monotonic()
+        if now - self._last_spoke_at < self.MIN_RESPONSE_INTERVAL:
+            self._barge_in = True
+            logger.info("[%s] Soft barge-in detected.", self.bot_id)
+
         if self._flush_handle:
             self._flush_handle.cancel()
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self._flush_handle = loop.call_later(
             self.FLUSH_DELAY, lambda: asyncio.ensure_future(self._flush())
         )
@@ -179,8 +195,12 @@ class InterviewSession:
         if self._phase == _PHASE_INTRO:
             self._intro_exchanges += 1
 
-        response = await self._generate(combined)
-        await self._speak(response)
+        self._barge_in = False
+        if settings.llm_streaming:
+            await self._stream_and_speak(combined)
+        else:
+            response = await self._generate(combined)
+            await self._speak(response)
 
         await self._check_phase_transition()
 
@@ -272,6 +292,46 @@ class InterviewSession:
         except Exception as exc:
             logger.error("[%s] LLM error: %s", self.bot_id, exc)
             return "Could you elaborate on that?"
+
+    async def _stream_and_speak(self, user_text: str) -> None:
+        """Stream LLM tokens, deliver TTS per sentence, abort between sentences on barge-in."""
+        self._history.append({"role": "user", "content": user_text})
+        full_reply = ""
+        buf = ""
+        try:
+            stream = await _openai.chat.completions.create(
+                model=settings.llm_model,
+                messages=self._history,
+                max_tokens=80,
+                temperature=0.85,
+                stream=True,
+            )
+            async for chunk in stream:
+                if self._barge_in:
+                    logger.info("[%s] Soft barge-in: aborting generation.", self.bot_id)
+                    break
+                delta = chunk.choices[0].delta.content or ""
+                full_reply += delta
+                buf += delta
+                sentences, buf = _sentence_chunks(buf)
+                for sent in sentences:
+                    if not self._barge_in:
+                        await self._speak(sent)
+            if buf.strip() and not self._barge_in:
+                await self._speak(buf.strip())
+        except Exception as exc:
+            logger.error("[%s] Streaming LLM error: %s", self.bot_id, exc)
+            if not self._barge_in:
+                await self._speak("Could you elaborate on that?")
+        if full_reply:
+            self._history.append({"role": "assistant", "content": full_reply})
+            logger.info("[%s] → Bot (streamed): %s", self.bot_id, full_reply)
+            try:
+                await recall_client.send_chat_message(
+                    self.bot_id, f"🤖 Interviewer: {full_reply}"
+                )
+            except Exception as exc:
+                logger.warning("[%s] Chat message failed: %s", self.bot_id, exc)
 
     # ------------------------------------------------------------------
     # Text-to-speech + delivery

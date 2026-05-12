@@ -19,6 +19,7 @@ from app.context_manager import (
     _build_idf,
     _tfidf_vec,
     _make_exchanges,
+    stable_prefix_tokens,
     prioritize,
 )
 
@@ -588,6 +589,55 @@ class TestEdgeCases:
         id_to_idx = {id(m): i for i, m in enumerate(history)}
         indices = [id_to_idx[id(m)] for m in non_system if id(m) in id_to_idx]
         assert indices == sorted(indices)
+
+
+# ── stable_prefix_tokens ──────────────────────────────────────────────────────
+
+class TestStablePrefixTokens:
+    def test_counts_leading_system_messages(self):
+        history = [
+            {"role": "system", "content": "You are Alex."},
+            {"role": "system", "content": "Phase: INTRO."},
+            {"role": "user", "content": "Hi"},
+        ]
+        count = stable_prefix_tokens(history)
+        assert count > 0
+
+    def test_stops_at_first_non_system_message(self):
+        history = [
+            {"role": "system", "content": "You are Alex."},
+            {"role": "user", "content": "Hi there"},
+            {"role": "system", "content": "After user — should not be counted"},
+        ]
+        count = stable_prefix_tokens(history)
+        expected = _approx_tokens({"role": "system", "content": "You are Alex."})
+        assert count == expected
+
+    def test_all_system_messages_returns_full_sum(self):
+        history = [
+            {"role": "system", "content": "Instruction A"},
+            {"role": "system", "content": "Instruction B"},
+        ]
+        count = stable_prefix_tokens(history)
+        expected = sum(_approx_tokens(m) for m in history)
+        assert count == expected
+
+    def test_empty_history_returns_zero(self):
+        assert stable_prefix_tokens([]) == 0
+
+    def test_no_system_messages_returns_zero(self):
+        history = [{"role": "user", "content": "Hello"}]
+        assert stable_prefix_tokens(history) == 0
+
+    def test_result_is_less_than_full_history_token_sum(self):
+        history = [
+            {"role": "system", "content": "You are Alex."},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!"},
+        ]
+        prefix = stable_prefix_tokens(history)
+        full = sum(_approx_tokens(m) for m in history)
+        assert prefix < full
 
 
 # ── tiktoken-specific ─────────────────────────────────────────────────────────

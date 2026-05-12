@@ -20,5 +20,12 @@ class Settings(BaseSettings):
     tts_base_url: str = "https://api.openai.com/v1"
     tts_voice: str = "onyx"
 
+    # Streaming: deliver tokens sentence-by-sentence → TTS starts before generation ends
+    llm_streaming: bool = True
+
+    # Ollama / local-model settings (used when llm_base_url points to Ollama)
+    llm_quantization: str = "q4_K_M"   # 4-bit quantization for Llama-3 LoRA adapter
+    lora_adapter_path: str = ""         # path to LoRA adapter file relative to Ollama
+
 
 settings = Settings()

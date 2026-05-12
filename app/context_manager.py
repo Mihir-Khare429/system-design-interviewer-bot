@@ -1,5 +1,5 @@
 """
-Context prioritization — production-grade.
+Context prioritization with KV-cache awareness — production-grade.
 
 Improvements over the initial bag-of-words version:
 
@@ -25,6 +25,14 @@ Improvements over the initial bag-of-words version:
      Eliminates the ~20-30% estimation error of the word-count heuristic.
      Falls back to the heuristic if tiktoken is not installed (CI / test
      environments that don't need the extra dep).
+
+  5. KV-cache prefix tracking
+     System messages at the start of history form a stable prefix that never
+     changes after being written. LLM servers that support prefix caching
+     (Ollama context reuse, OpenAI automatic prompt caching ≥ 1024 tokens,
+     vLLM --enable-prefix-caching) serve these tokens from cache on every
+     turn after the first. stable_prefix_tokens() exposes the prefix size so
+     callers can log estimated cache utilisation.
 """
 
 import math
@@ -141,6 +149,31 @@ def _make_exchanges(messages: list[dict]) -> list[list[dict]]:
     return exchanges
 
 
+# ── KV-cache prefix ───────────────────────────────────────────────────────────
+
+
+def stable_prefix_tokens(history: list[dict]) -> int:
+    """
+    Return the token count of the KV-cacheable system-message prefix.
+
+    The leading run of system messages in *history* is never reordered or
+    dropped by prioritize().  An LLM server with prefix caching will hit cache
+    for these tokens on every turn after the first, effectively making them
+    "free".  Log this value alongside total context size to track cache
+    utilisation.
+
+    >>> stable_prefix_tokens([{"role": "system", "content": "You are Alex."},
+    ...                        {"role": "user",   "content": "Hi"}])
+    8   # (approximate — exact count depends on tiktoken availability)
+    """
+    total = 0
+    for msg in history:
+        if msg["role"] != "system":
+            break
+        total += _approx_tokens(msg)
+    return total
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
@@ -211,14 +244,20 @@ def prioritize(history: list[dict], current_user_text: str) -> list[dict]:
 
     pruned = system_msgs + selected_msgs + anchor
 
-    elapsed_ms  = (time.monotonic() - t0) * 1000
+    elapsed_ms   = (time.monotonic() - t0) * 1000
     total_tokens = sum(_approx_tokens(m) for m in pruned)
+    prefix_tok   = stable_prefix_tokens(pruned)
     dropped      = n_exchanges - len(selected)
     logger.info(
-        "context_manager: kept %d/%d exchanges + %d anchor | %s~%d tokens | dropped %d | %.1fms",
+        "context_manager: kept %d/%d exchanges + %d anchor | %s~%d tokens "
+        "| kv-cache prefix ~%d tok (%.0f%%) | dropped %d | %.1fms",
         len(selected), n_exchanges, len(anchor),
         "" if _HAS_TIKTOKEN else "approx ",
-        total_tokens, dropped, elapsed_ms,
+        total_tokens,
+        prefix_tok,
+        100 * prefix_tok / total_tokens if total_tokens else 0,
+        dropped,
+        elapsed_ms,
     )
 
     return pruned
