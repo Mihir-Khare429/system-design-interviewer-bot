@@ -9,6 +9,7 @@ __pycache__/
 htmlcov/
 .coverage
 *.egg-info/
+.venv/
 
 # Docker volumes / temp files
 /tmp/

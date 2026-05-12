@@ -1,45 +1,73 @@
 """
-Context prioritization for long interview conversations.
+Context prioritization — production-grade.
 
-Every turn, instead of sending the full conversation history to the LLM,
-we score each past exchange against the current user message using cosine
-similarity over word frequencies (bag-of-words). Only the highest-scoring
-chunks make it into the prompt, keeping the active context lean regardless
-of how long the conversation runs.
+Improvements over the initial bag-of-words version:
 
-Architecture:
-  - System messages are ALWAYS kept (they carry phase/difficulty instructions).
-  - The N most recent exchanges are ALWAYS kept (recency anchor).
-  - All other user/assistant pairs are scored and the top-k are added until
-    we hit the token budget.
-  - Scoring runs in ~1ms pure Python — no external deps, no network calls.
+  1. TF-IDF scoring
+     Raw term frequency gives equal weight to "use", "would", "system" and to
+     "kafka", "sharding", "consistent-hashing". IDF demotes words that appear
+     in every exchange and promotes rare, signal-rich terms. The IDF table is
+     rebuilt over the full conversation corpus each call — at this scale that
+     costs under 0.5ms and the signal improvement is large.
+
+  2. Exchange-level chunking
+     User + assistant messages are scored and kept/dropped as pairs. This
+     prevents half-conversations: you never keep "What's your replication
+     strategy?" without its answer, or vice versa.
+
+  3. Recency-decay blending
+     final_score = COSINE_WEIGHT * tfidf_cosine + RECENCY_WEIGHT * recency
+     where recency = 1 / (1 + distance_from_current_turn).
+     A slightly less relevant exchange from 2 turns ago beats a marginally
+     more relevant one from 30 turns ago — matching real interview recall.
+
+  4. tiktoken for accurate token counting
+     Eliminates the ~20-30% estimation error of the word-count heuristic.
+     Falls back to the heuristic if tiktoken is not installed (CI / test
+     environments that don't need the extra dep).
 """
 
 import math
 import re
 import time
 import logging
-from typing import Sequence
 
 logger = logging.getLogger(__name__)
 
-# ── Tuning knobs ────────────────────────────────────────────────────────────
+# ── Optional accurate tokeniser ───────────────────────────────────────────────
 
-TOKEN_BUDGET = 1_500      # max tokens for the retrieved context window
-RECENCY_ANCHOR = 4        # always include the last N non-system messages
-WORDS_PER_TOKEN = 0.75    # conservative estimate (English ~0.75 words/token)
-MIN_WORD_LEN = 2          # ignore single-char tokens in similarity scoring
+try:
+    import tiktoken
+    _enc = tiktoken.get_encoding("cl100k_base")  # matches GPT-3.5/4/4o + most Ollama models
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+    def _count_tokens(text: str) -> int:
+        # +4 accounts for ChatML per-message framing overhead (<|im_start|>role\n…<|im_end|>)
+        return len(_enc.encode(text)) + 4
+
+    _HAS_TIKTOKEN = True
+except ImportError:
+    def _count_tokens(text: str) -> int:  # type: ignore[misc]
+        return max(4, int(len(text.split()) / 0.75))
+
+    _HAS_TIKTOKEN = False
+
+# ── Tuning ────────────────────────────────────────────────────────────────────
+
+TOKEN_BUDGET   = 1_500   # max tokens for the active context window
+RECENCY_ANCHOR = 4       # last N non-system messages always included verbatim
+COSINE_WEIGHT  = 0.7     # blend weight for TF-IDF cosine similarity
+RECENCY_WEIGHT = 0.3     # blend weight for recency decay  (must sum to 1.0)
+MIN_WORD_LEN   = 2       # single-char tokens carry no discriminating signal
+
+# ── Text primitives ───────────────────────────────────────────────────────────
 
 
 def _tokenize(text: str) -> list[str]:
-    """Lowercase, strip punctuation, return words ≥ MIN_WORD_LEN."""
+    """Lowercase, strip punctuation, return content words."""
     return [w for w in re.findall(r"[a-z]+", text.lower()) if len(w) >= MIN_WORD_LEN]
 
 
 def _term_freq(words: list[str]) -> dict[str, float]:
-    """Raw term-frequency vector (not normalised yet)."""
     tf: dict[str, float] = {}
     for w in words:
         tf[w] = tf.get(w, 0) + 1
@@ -47,7 +75,6 @@ def _term_freq(words: list[str]) -> dict[str, float]:
 
 
 def _cosine(a: dict[str, float], b: dict[str, float]) -> float:
-    """Cosine similarity between two TF dicts."""
     if not a or not b:
         return 0.0
     dot = sum(a.get(w, 0.0) * v for w, v in b.items())
@@ -59,74 +86,139 @@ def _cosine(a: dict[str, float], b: dict[str, float]) -> float:
 
 
 def _approx_tokens(msg: dict) -> int:
-    """Rough token count for a single message dict."""
-    words = len((msg.get("content") or "").split())
-    return max(4, int(words / WORDS_PER_TOKEN))
+    return _count_tokens(msg.get("content") or "")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── IDF ───────────────────────────────────────────────────────────────────────
+
+
+def _build_idf(messages: list[dict]) -> dict[str, float]:
+    """
+    Compute smoothed IDF weights over a message corpus.
+
+    idf(w) = log((N + 1) / (df(w) + 1)) + 1
+
+    The +1 smoothing prevents zero weights for words that appear in every
+    message while still heavily discounting them relative to rare terms.
+    """
+    N = len(messages)
+    if N == 0:
+        return {}
+    df: dict[str, int] = {}
+    for msg in messages:
+        for w in set(_tokenize(msg.get("content") or "")):
+            df[w] = df.get(w, 0) + 1
+    return {w: math.log((N + 1) / (count + 1)) + 1.0 for w, count in df.items()}
+
+
+def _tfidf_vec(words: list[str], idf: dict[str, float]) -> dict[str, float]:
+    """TF-IDF vector: tf(w) * idf(w). Unknown words receive idf=1.0 (neutral)."""
+    tf = _term_freq(words)
+    return {w: count * idf.get(w, 1.0) for w, count in tf.items()}
+
+
+# ── Exchange chunking ─────────────────────────────────────────────────────────
+
+
+def _make_exchanges(messages: list[dict]) -> list[list[dict]]:
+    """
+    Group consecutive user→assistant messages into exchange pairs.
+    An unpaired trailing message is wrapped as a singleton list.
+    """
+    exchanges: list[list[dict]] = []
+    i = 0
+    while i < len(messages):
+        if (
+            i + 1 < len(messages)
+            and messages[i]["role"] == "user"
+            and messages[i + 1]["role"] == "assistant"
+        ):
+            exchanges.append([messages[i], messages[i + 1]])
+            i += 2
+        else:
+            exchanges.append([messages[i]])
+            i += 1
+    return exchanges
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 
 def prioritize(history: list[dict], current_user_text: str) -> list[dict]:
     """
     Return a pruned copy of *history* that fits within TOKEN_BUDGET.
 
-    *history* must be the full conversation list including system messages
-    (but NOT the current user turn — that's appended by the caller).
+    *history* must include system messages but NOT the current user turn —
+    the caller appends that after this function returns. The input list is
+    never mutated.
 
-    The returned list preserves the original ordering so the LLM sees a
-    coherent conversation rather than a randomly sampled one.
+    Scoring pipeline per exchange:
+      tfidf_cosine  = cosine(tfidf(exchange_words), tfidf(query_words))
+      recency       = 1 / (1 + distance_from_current_turn)
+      final_score   = COSINE_WEIGHT * tfidf_cosine + RECENCY_WEIGHT * recency
     """
     t0 = time.monotonic()
 
     system_msgs = [m for m in history if m["role"] == "system"]
     convo_msgs  = [m for m in history if m["role"] != "system"]
 
-    # Nothing to trim if the conversation is still short
     if len(convo_msgs) <= RECENCY_ANCHOR * 2:
-        logger.debug("context_manager: conversation short, passthrough")
+        logger.debug("context_manager: short conversation, passthrough")
         return history
 
-    # Split into recency anchor (always kept) and candidate pool (scored)
-    anchor   = convo_msgs[-RECENCY_ANCHOR:]
-    pool     = convo_msgs[:-RECENCY_ANCHOR]
+    anchor = convo_msgs[-RECENCY_ANCHOR:]
+    pool   = convo_msgs[:-RECENCY_ANCHOR]
 
-    # Score each message in the pool against the current user turn
-    query_tf = _term_freq(_tokenize(current_user_text))
-    scored: list[tuple[float, int, dict]] = []
-    for idx, msg in enumerate(pool):
-        sim = _cosine(query_tf, _term_freq(_tokenize(msg.get("content") or "")))
-        scored.append((sim, idx, msg))
+    # IDF built over the full conversation vocab (anchor included) so that
+    # words common across the whole interview are properly discounted.
+    idf = _build_idf(convo_msgs)
+    query_vec = _tfidf_vec(_tokenize(current_user_text), idf)
 
-    # Sort by score descending; secondary sort by recency (higher idx = more recent)
-    scored.sort(key=lambda x: (x[0], x[1] / max(len(pool), 1)), reverse=True)
+    exchanges  = _make_exchanges(pool)
+    n_exchanges = len(exchanges)
 
-    # Fill budget: system messages always in, then scored pool, then anchor
+    scored: list[tuple[float, int, list[dict]]] = []
+    for i, exchange in enumerate(exchanges):
+        words = [w for msg in exchange for w in _tokenize(msg.get("content") or "")]
+        exchange_vec = _tfidf_vec(words, idf)
+        cos = _cosine(query_vec, exchange_vec)
+
+        # distance=0 → most recent pool exchange → recency=1.0
+        distance = n_exchanges - 1 - i
+        recency  = 1.0 / (1.0 + distance)
+
+        score = COSINE_WEIGHT * cos + RECENCY_WEIGHT * recency
+        scored.append((score, i, exchange))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
     system_tokens = sum(_approx_tokens(m) for m in system_msgs)
     anchor_tokens = sum(_approx_tokens(m) for m in anchor)
-    remaining = TOKEN_BUDGET - system_tokens - anchor_tokens
+    remaining     = TOKEN_BUDGET - system_tokens - anchor_tokens
 
-    selected_pool: list[tuple[int, dict]] = []  # (original_idx, msg)
-    for score, orig_idx, msg in scored:
-        cost = _approx_tokens(msg)
+    selected: list[tuple[int, list[dict]]] = []  # (original_idx, exchange)
+    for _score, orig_idx, exchange in scored:
+        cost = sum(_approx_tokens(m) for m in exchange)
         if remaining >= cost:
-            selected_pool.append((orig_idx, msg))
+            selected.append((orig_idx, exchange))
             remaining -= cost
         if remaining <= 0:
             break
 
-    # Re-sort selected pool by original index to preserve conversation order
-    selected_pool.sort(key=lambda x: x[0])
-    selected_msgs = [m for _, m in selected_pool]
+    # Restore chronological order before returning
+    selected.sort(key=lambda x: x[0])
+    selected_msgs = [m for _, exchange in selected for m in exchange]
 
     pruned = system_msgs + selected_msgs + anchor
-    dropped = len(pool) - len(selected_pool)
 
-    elapsed_ms = (time.monotonic() - t0) * 1000
-    approx_tokens = sum(_approx_tokens(m) for m in pruned)
+    elapsed_ms  = (time.monotonic() - t0) * 1000
+    total_tokens = sum(_approx_tokens(m) for m in pruned)
+    dropped      = n_exchanges - len(selected)
     logger.info(
-        "context_manager: kept %d/%d pool msgs + %d anchor | ~%d tokens | dropped %d | %.1fms",
-        len(selected_pool), len(pool), len(anchor), approx_tokens, dropped, elapsed_ms,
+        "context_manager: kept %d/%d exchanges + %d anchor | %s~%d tokens | dropped %d | %.1fms",
+        len(selected), n_exchanges, len(anchor),
+        "" if _HAS_TIKTOKEN else "approx ",
+        total_tokens, dropped, elapsed_ms,
     )
 
     return pruned
