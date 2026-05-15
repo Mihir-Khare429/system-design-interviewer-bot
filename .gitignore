@@ -19,3 +19,5 @@ sdi_audio/
 .vscode/
 .idea/
 *.swp
+
+.claude
