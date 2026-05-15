@@ -1,14 +1,15 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import Link from "next/link";
 import Navbar from "@/components/layout/Navbar";
+import { api } from "@/lib/api";
 import {
-  PROBLEMS,
   DIFFICULTY_COLORS,
   CATEGORY_ICONS,
   type Category,
   type Difficulty,
+  type Problem,
 } from "@/lib/problems";
 
 const CATEGORIES: Category[] = [
@@ -28,9 +29,18 @@ export default function ProblemsPage() {
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState<Category | "All">("All");
   const [activeDifficulty, setActiveDifficulty] = useState<Difficulty | "All">("All");
+  const [problems, setProblems] = useState<Problem[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api<{ items: Problem[] }>("/api/problems", { auth: false })
+      .then((res) => setProblems(res.items))
+      .catch(() => setProblems([]))
+      .finally(() => setLoading(false));
+  }, []);
 
   const filtered = useMemo(() => {
-    let results = [...PROBLEMS];
+    let results = [...problems];
     if (activeCategory !== "All") {
       results = results.filter((p) => p.category === activeCategory);
     }
@@ -47,7 +57,7 @@ export default function ProblemsPage() {
       );
     }
     return results;
-  }, [search, activeCategory, activeDifficulty]);
+  }, [problems, search, activeCategory, activeDifficulty]);
 
   return (
     <div className="min-h-screen bg-[#0a0a0b]">
@@ -58,7 +68,7 @@ export default function ProblemsPage() {
         <div className="mb-8">
           <h1 className="text-2xl font-bold text-[#e8e8e8]">Problems</h1>
           <p className="mt-1 text-sm text-[#71717a]">
-            {PROBLEMS.length} system design problems calibrated to FAANG standards
+            {loading ? "Loading…" : `${problems.length} system design problems calibrated to FAANG standards`}
           </p>
         </div>
 

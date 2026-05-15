@@ -1,4 +1,4 @@
-.PHONY: build run test test-watch test-human report-human lint clean
+.PHONY: build run test test-watch test-human report-human lint clean dev-backend dev-frontend dev seed
 
 ## Build the production Docker image
 build:
@@ -29,6 +29,22 @@ report-human:
 ## Lint with ruff (if installed)
 lint:
 	@command -v ruff >/dev/null 2>&1 && ruff check app/ tests/ || echo "ruff not installed — skipping"
+
+## Seed the problems table (idempotent)
+seed:
+	python -m scripts.seed_problems
+
+## Run the FastAPI backend locally (no Docker)
+dev-backend:
+	uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+## Run the Next.js frontend
+dev-frontend:
+	cd frontend && npm run dev
+
+## Run both (use two terminals or a process manager)
+dev:
+	@echo "Run 'make dev-backend' and 'make dev-frontend' in two terminals."
 
 ## Remove Docker containers and images created by this project
 clean:

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import Navbar from "@/components/layout/Navbar";
+import UpgradeButton from "@/components/billing/UpgradeButton";
 
 const PLANS = [
   {
@@ -117,16 +118,19 @@ export default function PricingPage() {
                 ))}
               </ul>
 
-              <Link
-                href={plan.href}
-                className={`block w-full rounded-lg py-2.5 text-center text-sm font-semibold transition-colors ${
-                  plan.highlight
-                    ? "bg-green-500 text-[#0a0a0b] hover:bg-green-400"
-                    : "border border-[#27272a] text-[#e8e8e8] hover:border-[#3f3f46] hover:bg-white/5"
-                }`}
-              >
-                {plan.cta}
-              </Link>
+              {plan.highlight ? (
+                <UpgradeButton
+                  label={plan.cta}
+                  className="block w-full rounded-lg py-2.5 text-center text-sm font-semibold transition-colors bg-green-500 text-[#0a0a0b] hover:bg-green-400 disabled:opacity-50"
+                />
+              ) : (
+                <Link
+                  href={plan.href}
+                  className="block w-full rounded-lg py-2.5 text-center text-sm font-semibold transition-colors border border-[#27272a] text-[#e8e8e8] hover:border-[#3f3f46] hover:bg-white/5"
+                >
+                  {plan.cta}
+                </Link>
+              )}
             </div>
           ))}
         </div>

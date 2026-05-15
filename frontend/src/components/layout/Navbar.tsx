@@ -1,16 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/lib/auth-context";
 
 const NAV_LINKS = [
   { href: "/problems", label: "Problems" },
+  { href: "/dashboard", label: "Dashboard" },
   { href: "/pricing", label: "Pricing" },
 ];
 
 export default function Navbar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const { user, loading, signout } = useAuth();
 
   return (
     <header className="sticky top-0 z-50 border-b border-[#27272a] bg-[#0a0a0b]/80 backdrop-blur-md">
@@ -45,18 +49,48 @@ export default function Navbar() {
 
         {/* Auth */}
         <div className="flex items-center gap-2">
-          <Link
-            href="/auth/signin"
-            className="px-3 py-1.5 text-sm text-[#71717a] hover:text-[#e8e8e8] transition-colors"
-          >
-            Sign in
-          </Link>
-          <Link
-            href="/auth/signup"
-            className="px-3 py-1.5 text-sm font-medium rounded-md bg-green-500 text-[#0a0a0b] hover:bg-green-400 transition-colors"
-          >
-            Get started
-          </Link>
+          {loading ? null : user ? (
+            <>
+              <span className="hidden sm:flex items-center gap-2 px-2 py-1 rounded-md text-xs text-[#a1a1aa]">
+                <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
+                {user.email}
+                <span
+                  className={cn(
+                    "ml-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+                    user.plan === "pro"
+                      ? "border-green-500/30 text-green-400 bg-green-500/10"
+                      : "border-[#27272a] text-[#71717a]"
+                  )}
+                >
+                  {user.plan}
+                </span>
+              </span>
+              <button
+                onClick={() => {
+                  signout();
+                  router.push("/");
+                }}
+                className="px-3 py-1.5 text-sm text-[#71717a] hover:text-[#e8e8e8] transition-colors"
+              >
+                Sign out
+              </button>
+            </>
+          ) : (
+            <>
+              <Link
+                href="/auth/signin"
+                className="px-3 py-1.5 text-sm text-[#71717a] hover:text-[#e8e8e8] transition-colors"
+              >
+                Sign in
+              </Link>
+              <Link
+                href="/auth/signup"
+                className="px-3 py-1.5 text-sm font-medium rounded-md bg-green-500 text-[#0a0a0b] hover:bg-green-400 transition-colors"
+              >
+                Get started
+              </Link>
+            </>
+          )}
         </div>
       </div>
     </header>

@@ -15,6 +15,10 @@ htmlcov/
 /tmp/
 sdi_audio/
 
+# Local SQLite DB (user data — never commit)
+*.db
+*.db-journal
+
 # IDE
 .vscode/
 .idea/

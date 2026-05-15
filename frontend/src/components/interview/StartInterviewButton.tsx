@@ -2,24 +2,32 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useAuth } from "@/lib/auth-context";
 
 export default function StartInterviewButton({ slug }: { slug: string }) {
   const router = useRouter();
+  const { user, loading: authLoading } = useAuth();
   const [loading, setLoading] = useState(false);
 
   const handleStart = () => {
+    if (authLoading) return;
+    if (!user) {
+      router.push(`/auth/signin?redirect=/problems/${slug}`);
+      return;
+    }
     setLoading(true);
-    // Grab the selected difficulty from the radio group
     const form = document.querySelector<HTMLInputElement>('input[name="difficulty"]:checked');
     const difficulty = form?.value ?? "Mid";
     const sessionId = `${slug}-${Date.now()}`;
-    router.push(`/interview/${sessionId}?problem=${slug}&difficulty=${encodeURIComponent(difficulty)}`);
+    router.push(
+      `/interview/${sessionId}?problem=${slug}&difficulty=${encodeURIComponent(difficulty)}`
+    );
   };
 
   return (
     <button
       onClick={handleStart}
-      disabled={loading}
+      disabled={loading || authLoading}
       className="flex w-full items-center justify-center gap-2 rounded-lg bg-green-500 py-3 text-sm font-semibold text-[#0a0a0b] hover:bg-green-400 disabled:opacity-60 transition-colors"
     >
       {loading ? (
@@ -30,6 +38,8 @@ export default function StartInterviewButton({ slug }: { slug: string }) {
           </svg>
           Starting session…
         </>
+      ) : !user && !authLoading ? (
+        <>Sign in to start</>
       ) : (
         <>
           <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
