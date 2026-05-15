@@ -19,11 +19,18 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, HttpUrl
 
 from app import bot_runner
 from app import ui_session as ui_runner
+from app.auth import get_user_from_token, router as auth_router
+from app.billing import router as billing_router
+from app.config import settings
+from app.database import SessionLocal, init_db
+from app.problems_api import router as problems_router
+from app.quota import check_can_start_interview
 from app.recall_client import recall_client
 
 logging.basicConfig(
@@ -44,6 +51,7 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("System Design Interrogator Bot is starting up.")
+    await init_db()
     yield
     logger.info("Shutting down. Stopping all active sessions...")
     for bot_id in list(bot_runner.active_session_ids()):
@@ -59,6 +67,18 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.frontend_origin],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth_router)
+app.include_router(problems_router)
+app.include_router(billing_router)
 
 
 # ---------------------------------------------------------------------------
@@ -237,17 +257,40 @@ async def serve_ui():
 
 
 @app.websocket("/ws/interview")
-async def interview_websocket(websocket: WebSocket, topic: str = "", difficulty: str = "medium"):
+async def interview_websocket(
+    websocket: WebSocket,
+    topic: str = "",
+    difficulty: str = "medium",
+    problem: str = "",
+    token: str = "",
+):
     """
     WebSocket endpoint for the browser UI interview session.
 
-    Client sends:  {"type": "audio", "data": "<base64>", "mime": "audio/webm"}
-                   {"type": "end"}
-    Server sends:  {"type": "transcript"|"response"|"phase_change"|"session_started"|"scorecard_loading"|"scorecard", ...}
+    Auth: pass JWT as ?token=... query string.
+    Quota: rejects if the user has hit their monthly interview limit.
     """
     await websocket.accept()
+
+    # Authenticate
+    async with SessionLocal() as db:
+        user = await get_user_from_token(token, db)
+        if user is None:
+            await websocket.send_json({"type": "error", "message": "Not authenticated. Please sign in."})
+            await websocket.close(code=4401)
+            return
+        ok, reason = await check_can_start_interview(db, user)
+        if not ok:
+            await websocket.send_json({"type": "quota_exceeded", "message": reason})
+            await websocket.close(code=4403)
+            return
+
     session_id = uuid.uuid4().hex[:8]
-    session = ui_runner.create_ui_session(session_id, websocket, topic=topic, difficulty=difficulty)
+    session = ui_runner.create_ui_session(
+        session_id, websocket,
+        topic=topic, difficulty=difficulty,
+        user_id=user.id, problem_slug=problem or None,
+    )
 
     try:
         await websocket.send_json({"type": "session_started", "session_id": session_id})

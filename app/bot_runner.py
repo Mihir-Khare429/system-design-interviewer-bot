@@ -282,8 +282,8 @@ class InterviewSession:
             completion = await _openai.chat.completions.create(
                 model=settings.llm_model,
                 messages=self._history,
-                max_tokens=80,
-                temperature=0.85,
+                max_tokens=180,
+                temperature=0.8,
             )
             reply = completion.choices[0].message.content.strip()
             self._history.append({"role": "assistant", "content": reply})
@@ -302,8 +302,8 @@ class InterviewSession:
             stream = await _openai.chat.completions.create(
                 model=settings.llm_model,
                 messages=self._history,
-                max_tokens=80,
-                temperature=0.85,
+                max_tokens=180,
+                temperature=0.8,
                 stream=True,
             )
             async for chunk in stream:
@@ -413,7 +413,7 @@ class InterviewSession:
                         ],
                     },
                 ],
-                max_tokens=80,
+                max_tokens=120,
             )
             return resp.choices[0].message.content.strip()
         except Exception as exc:

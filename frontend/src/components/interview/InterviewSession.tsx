@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
 import ArchitectureCanvas from "./ArchitectureCanvas";
 import { getProblemBySlug, DIFFICULTY_COLORS } from "@/lib/problems";
+import { getToken } from "@/lib/api";
 
 type Phase = "INTRO" | "CONSTRAINTS" | "DESIGN" | "DEEP_DIVE" | "DONE";
 type Message = { role: "user" | "assistant"; content: string; timestamp: number };
@@ -44,6 +45,8 @@ export default function InterviewSession({
   const [connected, setConnected] = useState(false);
   const [scorecard, setScorecard] = useState<ScorecardData | null>(null);
   const [showCanvas, setShowCanvas] = useState(true);
+  const [endingState, setEndingState] = useState<"idle" | "ending" | "scoring">("idle");
+  const [endError, setEndError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -55,9 +58,13 @@ export default function InterviewSession({
   // ── WebSocket ────────────────────────────────────────────────────────────────
 
   const connect = useCallback(() => {
-    const url = `${WS_URL.replace(/^http/, "ws")}/ws/interview?topic=${encodeURIComponent(
-      problem?.category ?? ""
-    )}&difficulty=${encodeURIComponent(difficulty)}`;
+    const token = getToken() ?? "";
+    const url =
+      `${WS_URL.replace(/^http/, "ws")}/ws/interview` +
+      `?topic=${encodeURIComponent(problem?.category ?? "")}` +
+      `&difficulty=${encodeURIComponent(difficulty)}` +
+      `&problem=${encodeURIComponent(problemSlug)}` +
+      `&token=${encodeURIComponent(token)}`;
 
     const ws = new WebSocket(url);
     wsRef.current = ws;
@@ -92,8 +99,12 @@ export default function InterviewSession({
       if (msg.type === "interrupt") {
         stopCurrentAudio();
       }
+      if (msg.type === "scorecard_loading") {
+        setEndingState("scoring");
+      }
       if (msg.type === "scorecard") {
         setPhase("DONE");
+        setEndingState("idle");
         try {
           const parsed = typeof msg.data === "string" ? JSON.parse(msg.data) : msg.data;
           setScorecard(parsed as ScorecardData);
@@ -101,8 +112,18 @@ export default function InterviewSession({
           setScorecard({ summary: String(msg.data) });
         }
       }
+      if (msg.type === "error" || msg.type === "quota_exceeded") {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: msg.message ?? "Session could not start.",
+            timestamp: Date.now(),
+          },
+        ]);
+      }
     };
-  }, [problem, difficulty]);
+  }, [problem, difficulty, problemSlug]);
 
   useEffect(() => {
     connect();
@@ -197,7 +218,23 @@ export default function InterviewSession({
   }, [startRecording, stopRecording]);
 
   const sendEndInterview = () => {
-    wsRef.current?.send(JSON.stringify({ type: "end" }));
+    if (endingState !== "idle") return;
+    setEndError(null);
+
+    if (isRecording) stopRecording();
+    stopCurrentAudio();
+
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      setEndError("Not connected. Refresh the page and try again.");
+      return;
+    }
+    try {
+      ws.send(JSON.stringify({ type: "end" }));
+      setEndingState("ending");
+    } catch {
+      setEndError("Could not send end-interview signal.");
+    }
   };
 
   // ── Render ───────────────────────────────────────────────────────────────────
@@ -207,7 +244,29 @@ export default function InterviewSession({
   }
 
   return (
-    <div className="flex h-screen flex-col bg-[#0a0a0b] overflow-hidden">
+    <div className="relative flex h-screen flex-col bg-[#0a0a0b] overflow-hidden">
+      {/* Scoring overlay */}
+      {endingState !== "idle" && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-[#0a0a0b]/85 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-4 rounded-xl border border-[#27272a] bg-[#111113] px-8 py-6 max-w-sm text-center">
+            <svg className="h-6 w-6 animate-spin text-green-400" viewBox="0 0 24 24" fill="none">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+            </svg>
+            <div>
+              <div className="text-sm font-medium text-[#e8e8e8]">
+                {endingState === "ending" ? "Ending interview…" : "Generating scorecard…"}
+              </div>
+              <div className="mt-1 text-xs text-[#71717a]">This usually takes 5–20 seconds.</div>
+            </div>
+          </div>
+        </div>
+      )}
+      {endError && (
+        <div className="absolute top-14 left-1/2 z-40 -translate-x-1/2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
+          {endError}
+        </div>
+      )}
       {/* Top bar */}
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-[#27272a] px-4">
         <div className="flex items-center gap-3">
@@ -246,9 +305,10 @@ export default function InterviewSession({
           {/* End interview */}
           <button
             onClick={sendEndInterview}
-            className="rounded-md border border-red-500/20 bg-red-500/5 px-2.5 py-1 text-xs text-red-400 hover:bg-red-500/10 transition-colors"
+            disabled={endingState !== "idle"}
+            className="rounded-md border border-red-500/20 bg-red-500/5 px-2.5 py-1 text-xs text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            End interview
+            {endingState === "idle" ? "End interview" : endingState === "ending" ? "Ending…" : "Scoring…"}
           </button>
         </div>
       </header>

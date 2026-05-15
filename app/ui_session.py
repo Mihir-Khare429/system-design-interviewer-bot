@@ -19,15 +19,20 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 from fastapi import WebSocket
 from openai import AsyncOpenAI
+from sqlalchemy import select
 
 from app.config import settings
 from app.context_manager import prioritize
+from app.cost_tracking import CostMeter, estimate_tokens
+from app.database import SessionLocal
+from app.models import InterviewRun, UsageEvent
 from app.prompts import (
     DIFFICULTY_PROMPTS,
     PHASE_PROMPTS,
@@ -85,12 +90,22 @@ class UISession:
         {"type": "error", "message": "..."}
     """
 
-    def __init__(self, session_id: str, ws: WebSocket, topic: str = "", difficulty: str = "medium") -> None:
+    def __init__(
+        self,
+        session_id: str,
+        ws: WebSocket,
+        topic: str = "",
+        difficulty: str = "medium",
+        user_id: Optional[int] = None,
+        problem_slug: Optional[str] = None,
+    ) -> None:
         self.session_id = session_id
         self.ws = ws
         self.is_active = True
         self._topic = topic
         self._difficulty = difficulty
+        self._user_id = user_id
+        self._problem_slug = problem_slug
 
         self._history: list[dict] = [
             {"role": "system", "content": SYSTEM_DESIGN_INTERVIEWER_PROMPT}
@@ -102,6 +117,9 @@ class UISession:
         self._lock = asyncio.Lock()  # serialise audio processing
         self._barge_in = asyncio.Event()
         self._speaking: bool = False
+        self._meter = CostMeter()
+        self._run_id: Optional[int] = None
+        self._persisted_end: bool = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -114,6 +132,8 @@ class UISession:
         self._history.append({"role": "system", "content": PHASE_PROMPTS[_PHASE_INTRO]})
         self._phase_start_at = time.monotonic()
 
+        await self._create_run_record()
+
         opening = (
             "Hey — thanks for coming in today. I'm Alex, Senior Staff Engineer here, "
             "and I'll be running your system design interview. "
@@ -123,6 +143,67 @@ class UISession:
 
     async def stop(self) -> None:
         self.is_active = False
+        await self._persist_end(status="abandoned" if not self._persisted_end else None)
+
+    # ------------------------------------------------------------------
+    # Persistence helpers
+    # ------------------------------------------------------------------
+
+    async def _create_run_record(self) -> None:
+        if self._user_id is None:
+            return
+        try:
+            async with SessionLocal() as db:
+                run = InterviewRun(
+                    user_id=self._user_id,
+                    session_id=self.session_id,
+                    problem_slug=self._problem_slug or (self._problem.get("slug") if self._problem else None),
+                    difficulty=self._difficulty,
+                    status="active",
+                )
+                db.add(run)
+                await db.commit()
+                await db.refresh(run)
+                self._run_id = run.id
+        except Exception as exc:
+            logger.warning("[%s] Could not create InterviewRun: %s", self.session_id, exc)
+
+    async def _persist_end(self, status: Optional[str] = None, scorecard: Optional[dict] = None) -> None:
+        if self._user_id is None or self._run_id is None or self._persisted_end:
+            return
+        try:
+            async with SessionLocal() as db:
+                run = (await db.execute(select(InterviewRun).where(InterviewRun.id == self._run_id))).scalar_one_or_none()
+                if not run:
+                    return
+                run.transcript_json = json.dumps([m for m in self._history if m.get("role") in ("user", "assistant")])
+                if scorecard is not None:
+                    run.scorecard_json = json.dumps(scorecard)
+                    run.status = "completed"
+                elif status:
+                    run.status = status
+                run.input_tokens = self._meter.input_tokens
+                run.output_tokens = self._meter.output_tokens
+                run.tts_chars = self._meter.tts_chars
+                run.whisper_seconds = self._meter.whisper_seconds
+                run.estimated_cost_usd = self._meter.total_cost_usd
+                run.ended_at = datetime.now(timezone.utc)
+
+                for ev in self._meter.events:
+                    db.add(UsageEvent(
+                        user_id=self._user_id,
+                        interview_run_id=self._run_id,
+                        kind=ev["kind"],
+                        input_tokens=ev["input_tokens"],
+                        output_tokens=ev["output_tokens"],
+                        units=ev["units"],
+                        cost_usd=ev["cost_usd"],
+                    ))
+                self._meter.events.clear()
+                await db.commit()
+            self._persisted_end = True
+        except Exception as exc:
+            logger.warning("[%s] Could not persist InterviewRun end: %s", self.session_id, exc)
 
     # ------------------------------------------------------------------
     # Score card
@@ -139,12 +220,16 @@ class UISession:
                 temperature=0.2,
             )
             raw = completion.choices[0].message.content.strip()
+            usage = getattr(completion, "usage", None)
+            if usage is not None:
+                self._meter.record_llm(getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0))
             m = re.search(r"\{.*\}", raw, re.DOTALL)
             data = json.loads(m.group()) if m else {"summary": raw, "grade": "N/A", "hire": "N/A", "strengths": [], "gaps": [], "study": []}
         except Exception as exc:
             logger.error("[%s] Scorecard error: %s", self.session_id, exc)
             data = {"error": "Could not generate scorecard. Please review the transcript manually."}
         await self._send({"type": "scorecard", "data": data})
+        await self._persist_end(scorecard=data)
 
     # ------------------------------------------------------------------
     # Audio ingestion
@@ -249,6 +334,8 @@ class UISession:
 
     async def _transcribe(self, audio_bytes: bytes, mime_type: str) -> Optional[str]:
         ext = mime_type.split("/")[-1].split(";")[0]
+        approx_seconds = max(0.5, len(audio_bytes) / 32000.0)  # ~32 KB/s for compressed webm
+        self._meter.record_whisper(approx_seconds)
         try:
             result = await _whisper.audio.transcriptions.create(
                 model="whisper-1",
@@ -272,8 +359,8 @@ class UISession:
             stream = await _openai.chat.completions.create(
                 model=settings.llm_model,
                 messages=active_ctx,
-                max_tokens=80,
-                temperature=0.85,
+                max_tokens=180,
+                temperature=0.8,
                 stream=True,
             )
             async for chunk in stream:
@@ -298,6 +385,9 @@ class UISession:
         if full_reply:
             self._history.append({"role": "assistant", "content": full_reply})
             logger.info("[%s] Response (streamed): %s", self.session_id, full_reply)
+            input_est = estimate_tokens(" ".join(m.get("content", "") for m in active_ctx))
+            output_est = estimate_tokens(full_reply)
+            self._meter.record_llm(input_est, output_est)
 
     async def _generate(self, user_text: str) -> str:
         self._history.append({"role": "user", "content": user_text})
@@ -309,10 +399,13 @@ class UISession:
             completion = await _openai.chat.completions.create(
                 model=settings.llm_model,
                 messages=active_ctx,
-                max_tokens=80,
-                temperature=0.85,
+                max_tokens=180,
+                temperature=0.8,
             )
             reply = completion.choices[0].message.content.strip()
+            usage = getattr(completion, "usage", None)
+            if usage is not None:
+                self._meter.record_llm(getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0))
             self._history.append({"role": "assistant", "content": reply})
             logger.info("[%s] Response: %s", self.session_id, reply)
             return reply
@@ -321,6 +414,7 @@ class UISession:
             return "Could you elaborate on that?"
 
     async def _tts(self, text: str) -> Optional[bytes]:
+        self._meter.record_tts(len(text))
         try:
             resp = await _tts_client.audio.speech.create(
                 model="kokoro" if "kokoro" in settings.tts_base_url else "tts-1",
@@ -359,8 +453,19 @@ class UISession:
 _ui_sessions: dict[str, "UISession"] = {}
 
 
-def create_ui_session(session_id: str, ws: WebSocket, topic: str = "", difficulty: str = "medium") -> UISession:
-    session = UISession(session_id, ws, topic=topic, difficulty=difficulty)
+def create_ui_session(
+    session_id: str,
+    ws: WebSocket,
+    topic: str = "",
+    difficulty: str = "medium",
+    user_id: Optional[int] = None,
+    problem_slug: Optional[str] = None,
+) -> UISession:
+    session = UISession(
+        session_id, ws,
+        topic=topic, difficulty=difficulty,
+        user_id=user_id, problem_slug=problem_slug,
+    )
     _ui_sessions[session_id] = session
     return session
 

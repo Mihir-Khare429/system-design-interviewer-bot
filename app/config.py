@@ -27,5 +27,31 @@ class Settings(BaseSettings):
     llm_quantization: str = "q4_K_M"   # 4-bit quantization for Llama-3 LoRA adapter
     lora_adapter_path: str = ""         # path to LoRA adapter file relative to Ollama
 
+    # ----- SaaS additions -----
+    database_url: str = "sqlite+aiosqlite:///./sdi.db"
+    jwt_secret: str = "dev-secret-change-me-in-prod"
+    jwt_algorithm: str = "HS256"
+    jwt_expires_minutes: int = 60 * 24 * 7  # 7 days
+
+    # Plans / quota
+    free_monthly_interviews: int = 3
+    pro_monthly_interviews: int = 1000  # effectively unlimited
+
+    # Stripe (test mode keys; empty string disables real billing)
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_id_pro: str = ""
+    stripe_success_url: str = "http://localhost:3000/dashboard?upgraded=1"
+    stripe_cancel_url: str = "http://localhost:3000/pricing"
+
+    # Pricing for cost tracking ($ per 1K tokens). Defaults match gpt-4o list price.
+    price_input_per_1k: float = 0.0025
+    price_output_per_1k: float = 0.01
+    price_whisper_per_minute: float = 0.006
+    price_tts_per_1k_chars: float = 0.015
+
+    # Frontend origin allowed for CORS
+    frontend_origin: str = "http://localhost:3000"
+
 
 settings = Settings()
