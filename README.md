@@ -303,6 +303,7 @@ All settings are read from `.env`. See `.env.example` for the full list.
 | `TTS_BASE_URL` | `https://api.openai.com/v1` | TTS API base — set to Kokoro for free local TTS |
 | `TTS_VOICE` | `onyx` | TTS voice name (`af_bella`, `am_michael`, `bm_george`, etc.) |
 | `OPENAI_API_KEY` | — | Required for browser UI mic transcription (Whisper). Also needed if `LLM_BASE_URL` / `TTS_BASE_URL` point to OpenAI |
+| `LLM_STREAMING` | `false` | Set to `true` to enable sentence-chunked streaming delivery and barge-in interruption |
 
 ### Switching between OpenAI and local
 
@@ -325,6 +326,73 @@ OPENAI_API_KEY=sk-...
 
 ---
 
+## DPO Fine-Tuning
+
+The `scripts/` directory contains a full DPO (Direct Preference Optimization) pipeline to fine-tune a small Llama-3 model to behave more like Alex.
+
+### What it does
+
+- **Dataset** (`data/dpo_dataset.jsonl`) — 25 curated (prompt, chosen, rejected) triplets. Each `chosen` response is a concise, targeted probe (≤90 words, ends with `?`). Each `rejected` response is a verbose, multi-topic answer that hints at the solution — exactly what Alex should *not* say.
+- **Training** (`scripts/train_dpo.py`) — LoRA fine-tuning with TRL's `DPOTrainer`. Runs NF4 4-bit quantization so an 8B model fits on 16–24 GB VRAM. Hyperparameters, adapter artifacts, and per-step metrics are all logged to MLflow.
+- **Evaluation** (`scripts/eval_judge.py`) — LLM-as-judge scoring. Generates responses from both base and fine-tuned models for a held-out eval set, then asks GPT-4o to score each on realism, challenge, conciseness, and specificity (1–5 each). Results are logged to MLflow alongside the raw per-prompt breakdown for drill-down analysis.
+
+### Requirements
+
+```bash
+# Separate venv (heavy GPU deps — not needed to run the app)
+python -m venv .venv-train
+source .venv-train/bin/activate
+pip install -r requirements-train.txt
+```
+
+Hardware: a single NVIDIA GPU with ≥16 GB VRAM (24 GB recommended for the 8B model). For CPU-only debugging, remove `bitsandbytes` and set `load_in_4bit=False` in `train_dpo.py`.
+
+### Train
+
+```bash
+python scripts/train_dpo.py \
+  --model meta-llama/Meta-Llama-3.2-3B-Instruct \
+  --epochs 3 \
+  --output models/lora_adapter
+```
+
+Key flags: `--beta` (DPO temperature, default 0.1), `--lora-rank` (default 16), `--lr` (default 5e-5), `--mlflow-tracking-uri`.
+
+### Evaluate (before/after)
+
+```bash
+# Compare base Llama vs fine-tuned adapter (both served via Ollama)
+python scripts/eval_judge.py \
+  --base-url http://localhost:11434/v1 \
+  --base-model llama3.2:3b-instruct   \
+  --tuned-model sdi-interviewer        \
+  --openai-api-key $OPENAI_API_KEY
+
+# Attach eval results to the training MLflow run
+python scripts/eval_judge.py --run-id <run_id_from_train>
+```
+
+### MLflow dashboard
+
+```bash
+mlflow ui --backend-store-uri ./mlruns
+# → http://localhost:5000
+```
+
+---
+
+## Streaming Delivery & Barge-In
+
+Both the browser UI and the video call bot support **sentence-chunked streaming** for lower first-token latency:
+
+- LLM tokens are streamed and buffered until a sentence boundary (`.`, `!`, `?`) is detected.
+- Each complete sentence is sent to TTS and played back immediately — the candidate hears the first sentence while the rest is still being generated.
+- **Barge-in**: if the candidate starts speaking while Alex is still talking, the current TTS stream is interrupted between sentences. In the browser UI a `{"type": "interrupt"}` frame is sent; in the bot runner the next response replaces the current one.
+
+Enable streaming: set `LLM_STREAMING=true` in `.env` (default is `false` for compatibility).
+
+---
+
 ## Running Tests
 
 ### Full suite (mocked — no API keys needed)
@@ -339,7 +407,7 @@ Or in watch mode (reruns on file change):
 make test-watch
 ```
 
-Current: **87 / 87 tests passing**.
+Current: **357 / 357 tests passing** (8 skipped — live LLM tests, see below).
 
 ### Human-likeness tests (requires Ollama running locally)
 
@@ -401,23 +469,33 @@ Change voice by setting `TTS_VOICE` in `.env` and running `docker compose up -d`
 .
 ├── app/
 │   ├── main.py              # FastAPI routes — webhooks, /ui, /ws/interview
-│   ├── bot_runner.py        # Video call bot session — 4-phase flow, Recall.ai delivery
+│   ├── bot_runner.py        # Video call bot session — 4-phase flow, streaming, barge-in
 │   ├── ui_session.py        # Browser UI session — same 4-phase flow, WebSocket delivery
-│   ├── context_manager.py   # Context prioritization — cosine scoring, token budget
+│   ├── context_manager.py   # Context prioritization — cosine scoring, token budget, KV prefix
 │   ├── recall_client.py     # Recall.ai API client
 │   ├── config.py            # Settings loaded from .env
 │   ├── prompts.py           # Persona, PHASE_PROMPTS, DIFFICULTY_PROMPTS, INTERVIEW_PROBLEMS
 │   └── static/
 │       └── index.html       # Browser UI — setup screen, canvas, audio chat, scorecard
+├── data/
+│   └── dpo_dataset.jsonl    # 25 DPO training examples (prompt / chosen / rejected)
+├── scripts/
+│   ├── train_dpo.py         # DPO LoRA fine-tuning — NF4 quantization, MLflow logging
+│   └── eval_judge.py        # LLM-as-judge before/after evaluation, MLflow logging
 ├── tests/
-│   ├── test_context_manager.py  # 36 offline unit tests for context prioritization
+│   ├── test_context_manager.py  # 42 offline tests — context prioritization + KV prefix
+│   ├── test_ui_session.py       # 47 tests — streaming, barge-in, sentence chunking
+│   ├── test_bot_runner.py       # Tests for video call session
+│   ├── test_dpo_dataset.py      # 19 tests — dataset schema + quality checks
+│   ├── test_train_dpo.py        # 37 tests — DPO training script (no GPU required)
+│   ├── test_eval_judge.py       # 54 tests — eval pipeline (mocked API calls)
 │   ├── test_human_likeness.py   # Live LLM tests — 9 human-likeness checks × 6 scenarios
 │   ├── test_main.py
-│   ├── test_bot_runner.py
 │   ├── test_prompts.py
 │   ├── test_recall_client.py
 │   ├── test_config.py
 │   └── conftest.py
+├── requirements-train.txt   # Heavy GPU deps for DPO training (separate venv)
 ├── docker-compose.yml
 ├── docker-compose.test.yml
 ├── Dockerfile

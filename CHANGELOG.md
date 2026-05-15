@@ -4,6 +4,60 @@ All notable changes to the System Design Interviewer Bot are documented here.
 
 ---
 
+## [2026-05-14] — DPO Fine-Tuning Pipeline + Streaming Delivery + Barge-In
+
+### Added
+
+- **DPO training dataset** (`data/dpo_dataset.jsonl`) — 25 curated (prompt, chosen, rejected) triplets in TRL conversational format. Each `chosen` response is a concise, targeted probe (≤90 words, ends with `?`, no markdown, no answer hints). Each `rejected` response is deliberately verbose and multi-topic, encoding what Alex should *not* say. Covers URL shortener, rate limiter, news feed, chat/presence, payments, CDN, search, distributed locks, queues, sharding, leader election, multi-region, and monitoring scenarios.
+
+- **`scripts/train_dpo.py`** — DPO LoRA fine-tuning pipeline:
+  - **NF4 4-bit quantization** via bitsandbytes — fits the 8B model on 16–24 GB VRAM.
+  - **LoRA adapters** via PEFT — trains only q/k/v/o/gate/up/down projections; `lora_rank=16`, `lora_alpha=32`.
+  - **TRL `DPOTrainer`** — `ref_model=None` (implicit reference from pre-LoRA weights, memory-efficient), `loss_type="sigmoid"`, `optim="adamw_8bit"`.
+  - **MLflow logging** — hyperparams, per-step training/eval metrics via a `TrainerCallback`, and the final LoRA adapter directory as an artifact. Experiment: `sdi-dpo`.
+  - Full CLI: `--model`, `--epochs`, `--beta`, `--lr`, `--lora-rank`, `--lora-alpha`, `--batch-size`, `--grad-acc`, `--output`, `--mlflow-tracking-uri`.
+  - Defaults: `meta-llama/Meta-Llama-3.2-3B-Instruct`, `DEFAULT_BETA=0.1`, `DEFAULT_LR=5e-5`, `DEFAULT_LORA_R=16`, `DEFAULT_LORA_A=32`, `EVAL_SPLIT=0.15`.
+
+- **`scripts/eval_judge.py`** — LLM-as-judge before/after evaluation pipeline:
+  - Generates responses from both base and fine-tuned models for each eval prompt via OpenAI-compatible endpoints (works with Ollama, vLLM, or real OpenAI).
+  - Asks GPT-4o to score each response on four dimensions: `realism`, `challenge`, `conciseness`, `specificity` (1–5 each). Scores are parsed from JSON with a fallback to zero on parse failure.
+  - Computes win rates (tuned vs base vs tie), per-dimension means, and overall means.
+  - Logs all metrics and a per-prompt breakdown JSON artifact to MLflow. Can attach to an existing training run via `--run-id`.
+  - CLI: `--base-url`, `--base-model`, `--tuned-url`, `--tuned-model`, `--judge-model`, `--dataset`, `--n-eval`, `--run-id`, `--mlflow-tracking-uri`, `--openai-api-key`.
+
+- **`requirements-train.txt`** — separate requirements file for the GPU training environment: `trl>=0.9.0`, `peft>=0.10.0`, `transformers>=4.44.0`, `accelerate>=0.30.0`, `datasets>=2.18.0`, `bitsandbytes>=0.43.0`, `mlflow>=2.12.0`.
+
+- **Streaming delivery** (`app/ui_session.py`, `app/bot_runner.py`) — LLM responses are now streamed token-by-token and split on sentence boundaries (`(?<=[.!?])\s+`). Each complete sentence is sent to TTS immediately, so the candidate hears the first sentence while the rest is still being generated. Falls back to batch mode when `LLM_STREAMING=false` (the default).
+
+- **Barge-in handling** — if the candidate starts speaking while Alex is mid-response, streaming is interrupted between sentence boundaries:
+  - **Browser UI** (`ui_session.py`) — uses `asyncio.Event` (`_barge_in`); sends `{"type": "interrupt"}` to the client to stop playback before starting the new response.
+  - **Video call bot** (`bot_runner.py`) — uses a boolean flag; new transcript pushes within `MIN_RESPONSE_INTERVAL` set the flag, and the streaming loop checks it between sentences.
+
+- **KV cache prefix tracking** (`app/context_manager.py`) — `stable_prefix_tokens()` counts the leading system messages as a cacheable prefix. Lets callers report the prefix length to the LLM provider for prompt caching efficiency.
+
+- **`tests/test_dpo_dataset.py`** — 19 tests covering dataset schema (required keys, message structure, role validity, no duplicates) and quality (chosen ≤90 words, chosen ends with `?`, rejected wordier by sentence count, no markdown in chosen, no hint phrases, technical content in candidate turns, system prompt mentions alex/interviewer).
+
+- **`tests/test_train_dpo.py`** — 37 tests covering `load_dataset()` (blank-line skipping, JSON error handling, large datasets, real file), `_build_parser()` (all defaults and overrides), and module constants (`DATA_PATH`, `ADAPTER_DIR`, `EVAL_SPLIT`, `DEFAULT_LR`, `DEFAULT_LORA_A = 2 × DEFAULT_LORA_R`).
+
+- **`tests/test_eval_judge.py`** — 54 tests covering `Scores` dataclass and `mean` property, `PromptResult` defaults, `_aggregate()` (win rates, mean scores, all keys present, empty input), `_judge()` JSON parsing (well-formed JSON, embedded JSON, partial keys, float scores, invalid/empty responses, correct system prompt, candidate turn forwarded), `_print_summary()`, `_build_parser()` defaults and overrides.
+
+- **`tests/test_ui_session.py`** — added `TestSentenceChunks` (5 tests), `TestStreamGenerate` (6 tests — per-sentence `_respond` calls, message append, barge-in abort, error fallback, None delta handling), `TestBargIn` (4 tests — interrupt frame, speaking flag reset).
+
+- **`tests/test_context_manager.py`** — added `TestStablePrefixTokens` (6 tests — counts leading system messages, stops at first non-system, full sum when all system, zero for empty input, zero when no system messages, less than full history sum).
+
+### Changed
+
+- **`app/bot_runner.py`** — `asyncio.get_event_loop()` → `asyncio.get_running_loop()` in `push_transcript()` to avoid deprecation warnings in Python 3.10+.
+- **`tests/test_bot_runner.py`** — three `TestPushTranscript` tests converted from `def` to `async def` to work with `get_running_loop()` (requires a running event loop).
+- **`tests/conftest.py`** — `LLM_STREAMING=false` set via `os.environ.setdefault` so all existing batch-mode tests continue working without modification.
+
+### Test results
+
+- 357 passing, 8 skipped (live LLM tests — require Ollama).
+- +278 tests added vs the previous entry (87 → 357).
+
+---
+
 ## [2026-05-04] — Context Prioritization + Problem Picker + Scorecard
 
 ### Added
