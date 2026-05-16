@@ -57,12 +57,14 @@ export default function Navbar() {
                 <span
                   className={cn(
                     "ml-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-                    user.plan === "pro"
+                    user.is_admin
+                      ? "border-purple-500/40 text-purple-300 bg-purple-500/10"
+                      : user.plan === "pro"
                       ? "border-green-500/30 text-green-400 bg-green-500/10"
                       : "border-[#27272a] text-[#71717a]"
                   )}
                 >
-                  {user.plan}
+                  {user.is_admin ? "admin" : user.plan}
                 </span>
               </span>
               <button

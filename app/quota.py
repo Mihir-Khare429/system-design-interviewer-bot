@@ -33,6 +33,8 @@ def monthly_limit(plan: str) -> int:
 
 async def quota_status(db: AsyncSession, user: User) -> dict:
     used = await interviews_used_this_month(db, user.id)
+    if user.is_admin:
+        return {"plan": "admin", "used": used, "limit": -1, "remaining": -1}
     limit = monthly_limit(user.plan)
     return {
         "plan": user.plan,
@@ -43,6 +45,8 @@ async def quota_status(db: AsyncSession, user: User) -> dict:
 
 
 async def check_can_start_interview(db: AsyncSession, user: User) -> tuple[bool, str]:
+    if user.is_admin:
+        return True, ""
     used = await interviews_used_this_month(db, user.id)
     limit = monthly_limit(user.plan)
     if used >= limit:

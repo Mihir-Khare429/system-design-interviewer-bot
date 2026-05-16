@@ -55,7 +55,16 @@ def create_access_token(user_id: int) -> str:
 
 
 def _user_dict(u: User) -> dict:
-    return {"id": u.id, "email": u.email, "name": u.name, "plan": u.plan}
+    plan = "pro" if u.is_admin else u.plan
+    return {"id": u.id, "email": u.email, "name": u.name, "plan": plan, "is_admin": u.is_admin}
+
+
+async def _maybe_promote_admin(user: User, db: AsyncSession) -> None:
+    """Auto-promote to admin if user's email is in settings.admin_emails allowlist."""
+    if user.email.lower() in settings.admin_email_set and not user.is_admin:
+        user.is_admin = True
+        await db.commit()
+        await db.refresh(user)
 
 
 async def get_current_user(
@@ -96,6 +105,7 @@ async def signup(req: SignupRequest, db: AsyncSession = Depends(get_db)) -> Toke
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    await _maybe_promote_admin(user, db)
     return TokenResponse(access_token=create_access_token(user.id), user=_user_dict(user))
 
 
@@ -104,6 +114,7 @@ async def signin(req: SigninRequest, db: AsyncSession = Depends(get_db)) -> Toke
     user = (await db.execute(select(User).where(User.email == req.email))).scalar_one_or_none()
     if not user or not verify_password(req.password, user.hashed_password):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
+    await _maybe_promote_admin(user, db)
     return TokenResponse(access_token=create_access_token(user.id), user=_user_dict(user))
 
 

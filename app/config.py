@@ -53,5 +53,13 @@ class Settings(BaseSettings):
     # Frontend origin allowed for CORS
     frontend_origin: str = "http://localhost:3000"
 
+    # Admin allowlist. Comma-separated emails. Users signing in/up with one of these
+    # are auto-promoted to admin (unlimited quota, plan reported as "pro").
+    admin_emails: str = ""
+
+    @property
+    def admin_email_set(self) -> set[str]:
+        return {e.strip().lower() for e in self.admin_emails.split(",") if e.strip()}
+
 
 settings = Settings()

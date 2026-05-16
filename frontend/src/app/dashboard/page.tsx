@@ -95,7 +95,9 @@ export default function DashboardPage() {
             <h1 className="text-2xl font-bold text-[#e8e8e8]">Dashboard</h1>
             <p className="mt-1 text-sm text-[#71717a]">
               {data.quota.used} interview{data.quota.used === 1 ? "" : "s"} this month ·{" "}
-              {data.quota.remaining} remaining on {data.quota.plan} plan
+              {data.quota.limit < 0
+                ? `unlimited on ${data.quota.plan} plan`
+                : `${data.quota.remaining} remaining on ${data.quota.plan} plan`}
             </p>
           </div>
           <Link

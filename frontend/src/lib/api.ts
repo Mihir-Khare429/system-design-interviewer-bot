@@ -56,5 +56,6 @@ export type AuthUser = {
   id: number;
   email: string;
   name: string | null;
-  plan: "free" | "pro";
+  plan: "free" | "pro" | "admin";
+  is_admin?: boolean;
 };
