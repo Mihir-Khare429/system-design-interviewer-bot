@@ -1,4 +1,4 @@
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -41,8 +41,18 @@ class Settings(BaseSettings):
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_price_id_pro: str = ""
-    stripe_success_url: str = "http://localhost:3000/dashboard?upgraded=1"
-    stripe_cancel_url: str = "http://localhost:3000/pricing"
+    # Derived from frontend_origin if not set explicitly
+    stripe_success_url: str = ""
+    stripe_cancel_url: str = ""
+
+    @model_validator(mode="after")
+    def _fill_stripe_redirect_urls(self) -> "Settings":
+        base = self.frontend_origin.rstrip("/")
+        if not self.stripe_success_url:
+            self.stripe_success_url = f"{base}/dashboard?upgraded=1"
+        if not self.stripe_cancel_url:
+            self.stripe_cancel_url = f"{base}/pricing"
+        return self
 
     # Pricing for cost tracking ($ per 1K tokens). Defaults match gpt-4o list price.
     price_input_per_1k: float = 0.0025
