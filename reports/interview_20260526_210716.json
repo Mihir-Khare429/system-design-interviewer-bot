@@ -1,0 +1,211 @@
+{
+  "meta": {
+    "run_at": "2026-05-26T21:07:12.444804+00:00",
+    "duration_seconds": 3.7,
+    "problem_brief": "Design a type-ahead search suggestion system."
+  },
+  "phases": {
+    "INTRO": {
+      "exchanges": 3
+    },
+    "CONSTRAINTS": {
+      "exchanges": 3
+    },
+    "DESIGN": {
+      "exchanges": 3
+    },
+    "DEEP_DIVE": {
+      "exchanges": 2
+    }
+  },
+  "scorecard": {
+    "summary": "Could you elaborate on that?",
+    "grade": "N/A",
+    "hire": "N/A",
+    "strengths": [],
+    "gaps": [],
+    "study": []
+  },
+  "transcript": [
+    {
+      "phase": "INTRO",
+      "role": "assistant",
+      "content": "Hey \u2014 thanks for coming in today. I'm Alex, Senior Staff Engineer here, and I'll be running your system design interview. How are you doing \u2014 feeling ready for this?",
+      "ts": "2026-05-26T21:07:12.452801+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "user",
+      "content": "I'm doing great, feeling ready for this.",
+      "ts": "2026-05-26T21:07:12.453706+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "assistant",
+      "content": "Nice to meet you! Tell me a bit about your background.",
+      "ts": "2026-05-26T21:07:12.453823+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "user",
+      "content": "I have five years of backend experience with distributed systems at scale.",
+      "ts": "2026-05-26T21:07:12.454487+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "assistant",
+      "content": "Great experience. How have you handled large-scale data pipelines?",
+      "ts": "2026-05-26T21:07:12.454579+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "user",
+      "content": "I've designed data pipelines processing 10 million events per day.",
+      "ts": "2026-05-26T21:07:12.455330+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "assistant",
+      "content": "Impressive. Let's jump into today's system design problem.",
+      "ts": "2026-05-26T21:07:12.455505+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "system",
+      "content": "[Phase \u2192 CONSTRAINTS]",
+      "ts": "2026-05-26T21:07:12.455591+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "assistant",
+      "content": "Alright, I think I've got a good sense of your background. Let me give you today's question.",
+      "ts": "2026-05-26T21:07:12.455672+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "assistant",
+      "content": "Design a type-ahead search suggestion system. Take a minute \u2014 ask me anything before you start designing. Scale, features, SLAs, whatever's on your mind.",
+      "ts": "2026-05-26T21:07:12.958753+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "user",
+      "content": "What are the expected daily active users?",
+      "ts": "2026-05-26T21:07:13.089352+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "assistant",
+      "content": "Alright, let's move to clarifying questions. What would you like to know?",
+      "ts": "2026-05-26T21:07:13.089564+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "user",
+      "content": "Does the system need strong or eventual consistency?",
+      "ts": "2026-05-26T21:07:13.116658+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "assistant",
+      "content": "Good question \u2014 target 100k DAU, with peak 10x that.",
+      "ts": "2026-05-26T21:07:13.116847+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "user",
+      "content": "What's the acceptable read latency at the 99th percentile?",
+      "ts": "2026-05-26T21:07:13.119197+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "assistant",
+      "content": "Eventual consistency is fine for most data; user sessions need strong consistency.",
+      "ts": "2026-05-26T21:07:13.119312+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "system",
+      "content": "[Phase \u2192 DESIGN]",
+      "ts": "2026-05-26T21:07:14.634686+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "assistant",
+      "content": "Alright, I think you've got what you need. Go ahead \u2014 walk me through your high-level design.",
+      "ts": "2026-05-26T21:07:14.635031+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "user",
+      "content": "For storage I'd use PostgreSQL with read replicas, and Redis for caching.",
+      "ts": "2026-05-26T21:07:14.641688+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "assistant",
+      "content": "Good. How does your approach handle write amplification?",
+      "ts": "2026-05-26T21:07:14.642181+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "user",
+      "content": "For async workloads I'd use Kafka with consumer groups.",
+      "ts": "2026-05-26T21:07:14.648216+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "assistant",
+      "content": "Interesting trade-off. What happens when the primary DB goes down?",
+      "ts": "2026-05-26T21:07:14.648541+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "user",
+      "content": "Circuit breakers between services, with exponential back-off retries.",
+      "ts": "2026-05-26T21:07:14.653141+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "assistant",
+      "content": "Let's stress-test this. Walk me through your failure modes.",
+      "ts": "2026-05-26T21:07:14.653367+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "system",
+      "content": "[Phase \u2192 DEEP_DIVE]",
+      "ts": "2026-05-26T21:07:16.164474+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "assistant",
+      "content": "Okay, let's go deeper. I want to stress-test some of the decisions you've made.",
+      "ts": "2026-05-26T21:07:16.164680+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "user",
+      "content": "I see.",
+      "ts": "2026-05-26T21:07:16.169395+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "assistant",
+      "content": "{\"grade\": \"B+\", \"hire\": \"Lean Yes\", \"summary\": \"Solid design with good trade-off reasoning.\", \"strengths\": \"Database layer, failure handling\", \"gaps\": \"Cost estimation could be sharper\", \"study\": \"Consistent hashing, CAP theorem\"}",
+      "ts": "2026-05-26T21:07:16.169621+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "user",
+      "content": "I see.",
+      "ts": "2026-05-26T21:07:16.173797+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "assistant",
+      "content": "Could you elaborate on that?",
+      "ts": "2026-05-26T21:07:16.173985+00:00"
+    }
+  ]
+}

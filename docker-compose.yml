@@ -12,8 +12,10 @@ services:
       - ./app:/app/app
       - sdi_audio:/tmp/sdi_audio
     depends_on:
-      - ngrok
-      - kokoro
+      ngrok:
+        condition: service_healthy
+      kokoro:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -31,6 +33,12 @@ services:
     environment:
       - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN:-}
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4040/api/tunnels"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   # ── Kokoro TTS (free, local, OpenAI-compatible) ───────────────────────────────
   # OpenAI-compatible TTS API at http://kokoro:8880/v1

@@ -1,0 +1,211 @@
+{
+  "meta": {
+    "run_at": "2026-05-26T21:10:23.257050+00:00",
+    "duration_seconds": 3.7,
+    "problem_brief": "Design a ride-sharing service."
+  },
+  "phases": {
+    "INTRO": {
+      "exchanges": 3
+    },
+    "CONSTRAINTS": {
+      "exchanges": 3
+    },
+    "DESIGN": {
+      "exchanges": 3
+    },
+    "DEEP_DIVE": {
+      "exchanges": 2
+    }
+  },
+  "scorecard": {
+    "grade": "B+",
+    "hire": "Lean Yes",
+    "summary": "Solid design with good trade-off reasoning. Strong on infrastructure, could sharpen cost estimates.",
+    "strengths": "Database layer, failure handling, async architecture",
+    "gaps": "Cost estimation, CDN strategy underspecified",
+    "study": "Consistent hashing, CAP theorem, cost optimization"
+  },
+  "transcript": [
+    {
+      "phase": "INTRO",
+      "role": "assistant",
+      "content": "Hey \u2014 thanks for coming in today. I'm Alex, Senior Staff Engineer here, and I'll be running your system design interview. How are you doing \u2014 feeling ready for this?",
+      "ts": "2026-05-26T21:10:23.264714+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "user",
+      "content": "I'm doing great, feeling ready for this.",
+      "ts": "2026-05-26T21:10:23.265604+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "assistant",
+      "content": "Nice to meet you! Tell me a bit about your background.",
+      "ts": "2026-05-26T21:10:23.265709+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "user",
+      "content": "I have five years of backend experience with distributed systems at scale.",
+      "ts": "2026-05-26T21:10:23.266357+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "assistant",
+      "content": "Great experience. How have you handled large-scale data pipelines?",
+      "ts": "2026-05-26T21:10:23.266448+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "user",
+      "content": "I've designed data pipelines processing 10 million events per day.",
+      "ts": "2026-05-26T21:10:23.267364+00:00"
+    },
+    {
+      "phase": "INTRO",
+      "role": "assistant",
+      "content": "Impressive. Let's jump into today's system design problem.",
+      "ts": "2026-05-26T21:10:23.267547+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "system",
+      "content": "[Phase \u2192 CONSTRAINTS]",
+      "ts": "2026-05-26T21:10:23.267639+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "assistant",
+      "content": "Alright, I think I've got a good sense of your background. Let me give you today's question.",
+      "ts": "2026-05-26T21:10:23.267720+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "assistant",
+      "content": "Design a ride-sharing service. Take a minute \u2014 ask me anything before you start designing. Scale, features, SLAs, whatever's on your mind.",
+      "ts": "2026-05-26T21:10:23.769045+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "user",
+      "content": "What are the expected daily active users?",
+      "ts": "2026-05-26T21:10:23.808970+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "assistant",
+      "content": "Good question \u2014 target 100k DAU, with peak 10x that.",
+      "ts": "2026-05-26T21:10:23.809150+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "user",
+      "content": "Does the system need strong or eventual consistency?",
+      "ts": "2026-05-26T21:10:23.834724+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "assistant",
+      "content": "Eventual consistency is fine for most data; sessions need strong consistency.",
+      "ts": "2026-05-26T21:10:23.834900+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "user",
+      "content": "What's the acceptable read latency at the 99th percentile?",
+      "ts": "2026-05-26T21:10:23.836976+00:00"
+    },
+    {
+      "phase": "CONSTRAINTS",
+      "role": "assistant",
+      "content": "P99 read latency target is under 100 ms for the suggestion results.",
+      "ts": "2026-05-26T21:10:23.837128+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "system",
+      "content": "[Phase \u2192 DESIGN]",
+      "ts": "2026-05-26T21:10:25.353603+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "assistant",
+      "content": "Alright, I think you've got what you need. Go ahead \u2014 walk me through your high-level design.",
+      "ts": "2026-05-26T21:10:25.353936+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "user",
+      "content": "I'd start with a load balancer fronting stateless API servers.",
+      "ts": "2026-05-26T21:10:25.360504+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "assistant",
+      "content": "Good. How does your load balancer handle backend failover?",
+      "ts": "2026-05-26T21:10:25.360784+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "user",
+      "content": "For storage I'd use PostgreSQL with read replicas and Redis for caching.",
+      "ts": "2026-05-26T21:10:25.366017+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "assistant",
+      "content": "Interesting. How do you handle replication lag in read replicas?",
+      "ts": "2026-05-26T21:10:25.366214+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "user",
+      "content": "For async workloads I'd use Kafka with consumer groups.",
+      "ts": "2026-05-26T21:10:25.370680+00:00"
+    },
+    {
+      "phase": "DESIGN",
+      "role": "assistant",
+      "content": "Good. How would you partition the Kafka topics by user or event type?",
+      "ts": "2026-05-26T21:10:25.370861+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "system",
+      "content": "[Phase \u2192 DEEP_DIVE]",
+      "ts": "2026-05-26T21:10:26.890091+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "assistant",
+      "content": "Okay, let's go deeper. I want to stress-test some of the decisions you've made.",
+      "ts": "2026-05-26T21:10:26.890490+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "user",
+      "content": "Circuit breakers between services, with exponential back-off retries.",
+      "ts": "2026-05-26T21:10:26.898394+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "assistant",
+      "content": "Good. Now walk me through a full cascading failure scenario.",
+      "ts": "2026-05-26T21:10:26.898764+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "user",
+      "content": "Storage estimate: 500 bytes per event times 10M events is about 5 GB per day.",
+      "ts": "2026-05-26T21:10:26.904493+00:00"
+    },
+    {
+      "phase": "DEEP_DIVE",
+      "role": "assistant",
+      "content": "Solid math. How does that storage cost scale at 10\u00d7 user growth?",
+      "ts": "2026-05-26T21:10:26.904727+00:00"
+    }
+  ]
+}

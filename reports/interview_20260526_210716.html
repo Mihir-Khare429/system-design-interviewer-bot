@@ -1,0 +1,60 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'>
+<title>SDI E2E Interview Report</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;background:#0f0f10;color:#e0e0e0}
+h1{color:#4ade80}h2{color:#a78bfa;margin-top:2em}
+.meta{color:#71717a;font-size:.9em}
+.phase{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.75em;font-weight:600;margin-right:6px}
+.INTRO{background:#312e81;color:#a5b4fc}.CONSTRAINTS{background:#451a03;color:#fdba74}
+.DESIGN{background:#0c1a2e;color:#7dd3fc}.DEEP_DIVE{background:#2d0b0b;color:#fca5a5}
+.msg{margin:8px 0;padding:10px 14px;border-radius:8px;font-size:.9em;line-height:1.5}
+.user{background:#1e1e2e;border-left:3px solid #7dd3fc}
+.assistant{background:#141420;border-left:3px solid #4ade80}
+.system{background:#18181b;border-left:3px solid #71717a;color:#71717a;font-style:italic}
+.scorecard{background:#111827;border:1px solid #374151;border-radius:10px;padding:20px;margin-top:16px}
+.grade{font-size:3em;font-weight:bold;color:#4ade80}
+</style></head><body>
+<h1>SDI E2E Interview Report</h1>
+<p class='meta'>Run: 2026-05-26T21:07:12.444804+00:00 &nbsp;|&nbsp; Duration: 3.7s</p>
+<p class='meta'>Problem: <strong>Design a type-ahead search suggestion system.</strong></p>
+<h2>Scorecard</h2>
+<div class='scorecard'>
+<div class='grade'>N/A</div>
+<p><strong>Decision:</strong> N/A</p>
+<p>Could you elaborate on that?</p>
+<p><strong>Strengths:</strong> []</p>
+<p><strong>Gaps:</strong> []</p>
+<p><strong>Study:</strong> []</p>
+</div>
+<h2>Transcript</h2>
+<div class='msg assistant'><span class='phase INTRO'>INTRO</span>Hey — thanks for coming in today. I'm Alex, Senior Staff Engineer here, and I'll be running your system design interview. How are you doing — feeling ready for this?</div>
+<div class='msg user'><span class='phase INTRO'>INTRO</span>I'm doing great, feeling ready for this.</div>
+<div class='msg assistant'><span class='phase INTRO'>INTRO</span>Nice to meet you! Tell me a bit about your background.</div>
+<div class='msg user'><span class='phase INTRO'>INTRO</span>I have five years of backend experience with distributed systems at scale.</div>
+<div class='msg assistant'><span class='phase INTRO'>INTRO</span>Great experience. How have you handled large-scale data pipelines?</div>
+<div class='msg user'><span class='phase INTRO'>INTRO</span>I've designed data pipelines processing 10 million events per day.</div>
+<div class='msg assistant'><span class='phase INTRO'>INTRO</span>Impressive. Let's jump into today's system design problem.</div>
+<div class='msg system'>[Phase → CONSTRAINTS]</div>
+<div class='msg assistant'><span class='phase CONSTRAINTS'>CONSTRAINTS</span>Alright, I think I've got a good sense of your background. Let me give you today's question.</div>
+<div class='msg assistant'><span class='phase CONSTRAINTS'>CONSTRAINTS</span>Design a type-ahead search suggestion system. Take a minute — ask me anything before you start designing. Scale, features, SLAs, whatever's on your mind.</div>
+<div class='msg user'><span class='phase CONSTRAINTS'>CONSTRAINTS</span>What are the expected daily active users?</div>
+<div class='msg assistant'><span class='phase CONSTRAINTS'>CONSTRAINTS</span>Alright, let's move to clarifying questions. What would you like to know?</div>
+<div class='msg user'><span class='phase CONSTRAINTS'>CONSTRAINTS</span>Does the system need strong or eventual consistency?</div>
+<div class='msg assistant'><span class='phase CONSTRAINTS'>CONSTRAINTS</span>Good question — target 100k DAU, with peak 10x that.</div>
+<div class='msg user'><span class='phase CONSTRAINTS'>CONSTRAINTS</span>What's the acceptable read latency at the 99th percentile?</div>
+<div class='msg assistant'><span class='phase CONSTRAINTS'>CONSTRAINTS</span>Eventual consistency is fine for most data; user sessions need strong consistency.</div>
+<div class='msg system'>[Phase → DESIGN]</div>
+<div class='msg assistant'><span class='phase DESIGN'>DESIGN</span>Alright, I think you've got what you need. Go ahead — walk me through your high-level design.</div>
+<div class='msg user'><span class='phase DESIGN'>DESIGN</span>For storage I'd use PostgreSQL with read replicas, and Redis for caching.</div>
+<div class='msg assistant'><span class='phase DESIGN'>DESIGN</span>Good. How does your approach handle write amplification?</div>
+<div class='msg user'><span class='phase DESIGN'>DESIGN</span>For async workloads I'd use Kafka with consumer groups.</div>
+<div class='msg assistant'><span class='phase DESIGN'>DESIGN</span>Interesting trade-off. What happens when the primary DB goes down?</div>
+<div class='msg user'><span class='phase DESIGN'>DESIGN</span>Circuit breakers between services, with exponential back-off retries.</div>
+<div class='msg assistant'><span class='phase DESIGN'>DESIGN</span>Let's stress-test this. Walk me through your failure modes.</div>
+<div class='msg system'>[Phase → DEEP_DIVE]</div>
+<div class='msg assistant'><span class='phase DEEP_DIVE'>DEEP_DIVE</span>Okay, let's go deeper. I want to stress-test some of the decisions you've made.</div>
+<div class='msg user'><span class='phase DEEP_DIVE'>DEEP_DIVE</span>I see.</div>
+<div class='msg assistant'><span class='phase DEEP_DIVE'>DEEP_DIVE</span>{"grade": "B+", "hire": "Lean Yes", "summary": "Solid design with good trade-off reasoning.", "strengths": "Database layer, failure handling", "gaps": "Cost estimation could be sharper", "study": "Consistent hashing, CAP theorem"}</div>
+<div class='msg user'><span class='phase DEEP_DIVE'>DEEP_DIVE</span>I see.</div>
+<div class='msg assistant'><span class='phase DEEP_DIVE'>DEEP_DIVE</span>Could you elaborate on that?</div>
+</body></html>

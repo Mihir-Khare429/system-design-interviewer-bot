@@ -6,6 +6,7 @@ Docs: https://docs.recall.ai/reference/bot-create
 import logging
 import httpx
 from app.config import settings
+from app.ngrok import get_public_url
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +38,9 @@ class RecallClient:
         - Post status change events to /api/webhook/recall
         - Auto-leave if alone for 5 minutes
         """
-        webhook_url = f"{settings.webhook_base_url}/api/webhook/recall"
-        transcription_url = f"{settings.webhook_base_url}/api/webhook/transcription"
+        base_url = await get_public_url() or settings.webhook_base_url
+        webhook_url = f"{base_url}/api/webhook/recall"
+        transcription_url = f"{base_url}/api/webhook/transcription"
 
         payload = {
             "meeting_url": meeting_url,
