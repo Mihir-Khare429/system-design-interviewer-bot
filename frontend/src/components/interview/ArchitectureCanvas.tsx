@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import ReactFlow, {
   addEdge,
   Background,
@@ -59,9 +59,29 @@ const nodeTypes: NodeTypes = { arch: ArchNode };
 
 let nodeIdCounter = 100;
 
+export type ArchitectureSnapshot = {
+  nodes: Array<{
+    id: string;
+    label: string;
+    type: string;
+    position: { x: number; y: number };
+  }>;
+  edges: Array<{
+    id: string;
+    source: string;
+    target: string;
+    sourceLabel: string;
+    targetLabel: string;
+  }>;
+};
+
 // ── Canvas ────────────────────────────────────────────────────────────────────
 
-export default function ArchitectureCanvas() {
+export default function ArchitectureCanvas({
+  onSnapshotChange,
+}: {
+  onSnapshotChange?: (snapshot: ArchitectureSnapshot) => void;
+}) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedType, setSelectedType] = useState<string>("service");
@@ -96,6 +116,37 @@ export default function ArchitectureCanvas() {
       ),
     [setEdges]
   );
+
+  useEffect(() => {
+    if (!onSnapshotChange) return;
+
+    const handle = window.setTimeout(() => {
+      const labelById = new Map(
+        nodes.map((node) => [
+          node.id,
+          String(node.data?.label ?? node.data?.type ?? "component"),
+        ])
+      );
+
+      onSnapshotChange({
+        nodes: nodes.map((node) => ({
+          id: node.id,
+          label: String(node.data?.label ?? node.data?.type ?? "component"),
+          type: String(node.data?.type ?? "component"),
+          position: node.position,
+        })),
+        edges: edges.map((edge) => ({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          sourceLabel: labelById.get(edge.source) ?? edge.source,
+          targetLabel: labelById.get(edge.target) ?? edge.target,
+        })),
+      });
+    }, 500);
+
+    return () => window.clearTimeout(handle);
+  }, [nodes, edges, onSnapshotChange]);
 
   const deleteSelected = useCallback(() => {
     setNodes((nds) => nds.filter((n) => !n.selected));

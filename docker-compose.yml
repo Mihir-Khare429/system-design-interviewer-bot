@@ -34,8 +34,14 @@ services:
       - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN:-}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4040/api/tunnels"]
-      interval: 30s
+      test:
+        [
+          "CMD",
+          "/usr/bin/bash",
+          "-lc",
+          "exec 3<>/dev/tcp/127.0.0.1/4040 && printf 'GET /api/tunnels HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3",
+        ]
+      interval: 5s
       timeout: 5s
       retries: 3
       start_period: 15s

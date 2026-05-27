@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
-import ArchitectureCanvas from "./ArchitectureCanvas";
+import ArchitectureCanvas, { type ArchitectureSnapshot } from "./ArchitectureCanvas";
 import { getProblemBySlug, DIFFICULTY_COLORS } from "@/lib/problems";
 import { getToken } from "@/lib/api";
 
@@ -43,6 +43,7 @@ export default function InterviewSession({
   const [isRecording, setIsRecording] = useState(false);
   const [alexSpeaking, setAlexSpeaking] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [liveMode, setLiveMode] = useState(false);
   const [scorecard, setScorecard] = useState<ScorecardData | null>(null);
   const [showCanvas, setShowCanvas] = useState(true);
   const [endingState, setEndingState] = useState<"idle" | "ending" | "scoring">("idle");
@@ -53,6 +54,17 @@ export default function InterviewSession({
   const chunksRef = useRef<Blob[]>([]);
   const audioQueueRef = useRef<string[]>([]);
   const audioPlayingRef = useRef(false);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const connectedRef = useRef(false);
+  const isRecordingRef = useRef(false);
+  const liveModeRef = useRef(false);
+  const liveStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const mediaSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const vadFrameRef = useRef<number | null>(null);
+  const lastSpeechAtRef = useRef(0);
+  const recordingStartedAtRef = useRef(0);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
   // ── WebSocket ────────────────────────────────────────────────────────────────
@@ -96,6 +108,9 @@ export default function InterviewSession({
           queueAudio(msg.audio);
         }
       }
+      if (msg.type === "response_audio" && msg.audio) {
+        queueAudio(msg.audio);
+      }
       if (msg.type === "interrupt") {
         stopCurrentAudio();
       }
@@ -130,6 +145,14 @@ export default function InterviewSession({
     return () => { wsRef.current?.close(); };
   }, [connect]);
 
+  useEffect(() => {
+    connectedRef.current = connected;
+  }, [connected]);
+
+  useEffect(() => {
+    liveModeRef.current = liveMode;
+  }, [liveMode]);
+
   // Auto-scroll transcript
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -140,6 +163,7 @@ export default function InterviewSession({
   const playNextInQueue = useCallback(() => {
     if (audioQueueRef.current.length === 0) {
       audioPlayingRef.current = false;
+      currentAudioRef.current = null;
       setAlexSpeaking(false);
       return;
     }
@@ -148,6 +172,7 @@ export default function InterviewSession({
     setAlexSpeaking(true);
 
     const audio = new Audio(`data:audio/mp3;base64,${b64}`);
+    currentAudioRef.current = audio;
     audio.onended = playNextInQueue;
     audio.onerror = playNextInQueue;
     audio.play().catch(() => playNextInQueue());
@@ -161,45 +186,173 @@ export default function InterviewSession({
     [playNextInQueue]
   );
 
-  const stopCurrentAudio = () => {
+  const stopCurrentAudio = useCallback(() => {
     audioQueueRef.current = [];
+    const audio = currentAudioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      currentAudioRef.current = null;
+    }
     audioPlayingRef.current = false;
     setAlexSpeaking(false);
-  };
+  }, []);
 
-  // ── Push-to-talk recording ───────────────────────────────────────────────────
+  // ── Realtime speech capture ─────────────────────────────────────────────────
 
-  const startRecording = useCallback(async () => {
-    if (isRecording || !connected) return;
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream, { mimeType: "audio/webm" });
+  const recorderMime = () =>
+    typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/webm")
+      ? "audio/webm"
+      : "";
+
+  const sendSpeechStart = useCallback(() => {
+    stopCurrentAudio();
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "speech_start" }));
+    }
+  }, [stopCurrentAudio]);
+
+  const beginRecordingOnStream = useCallback(
+    (stream: MediaStream, stopTracksOnStop: boolean) => {
+      if (isRecordingRef.current || !connectedRef.current) return;
+
+      const mime = recorderMime();
+      const mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
       chunksRef.current = [];
-      mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      recordingStartedAtRef.current = performance.now();
+
+      mr.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
       mr.onstop = () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        if (stopTracksOnStop) stream.getTracks().forEach((t) => t.stop());
+
+        const blobType = mr.mimeType || mime || "audio/webm";
+        const blob = new Blob(chunksRef.current, { type: blobType });
+        chunksRef.current = [];
+        isRecordingRef.current = false;
+        mediaRecorderRef.current = null;
+        setIsRecording(false);
+
+        if (blob.size < 256) return;
+
         const reader = new FileReader();
         reader.onloadend = () => {
-          const b64 = (reader.result as string).split(",")[1];
-          wsRef.current?.send(JSON.stringify({ type: "audio", data: b64, mime: "audio/webm" }));
+          const b64 = String(reader.result).split(",")[1];
+          if (!b64) return;
+          wsRef.current?.send(JSON.stringify({ type: "audio", data: b64, mime: blobType }));
         };
         reader.readAsDataURL(blob);
       };
+
+      sendSpeechStart();
       mr.start();
       mediaRecorderRef.current = mr;
+      isRecordingRef.current = true;
       setIsRecording(true);
+    },
+    [sendSpeechStart]
+  );
+
+  const stopRecording = useCallback(() => {
+    if (!isRecordingRef.current) return;
+    const mr = mediaRecorderRef.current;
+    if (mr && mr.state !== "inactive") {
+      mr.stop();
+    }
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    if (isRecordingRef.current || liveModeRef.current || !connectedRef.current) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      beginRecordingOnStream(stream, true);
     } catch (err) {
       console.error("Mic access denied:", err);
     }
-  }, [isRecording, connected]);
+  }, [beginRecordingOnStream]);
 
-  const stopRecording = useCallback(() => {
-    if (!isRecording) return;
-    mediaRecorderRef.current?.stop();
-    mediaRecorderRef.current = null;
-    setIsRecording(false);
-  }, [isRecording]);
+  const stopLiveMic = useCallback(() => {
+    liveModeRef.current = false;
+    setLiveMode(false);
+
+    if (vadFrameRef.current !== null) {
+      cancelAnimationFrame(vadFrameRef.current);
+      vadFrameRef.current = null;
+    }
+    if (isRecordingRef.current) stopRecording();
+
+    liveStreamRef.current?.getTracks().forEach((track) => track.stop());
+    liveStreamRef.current = null;
+    mediaSourceRef.current?.disconnect();
+    mediaSourceRef.current = null;
+    analyserRef.current = null;
+    audioContextRef.current?.close().catch(() => {});
+    audioContextRef.current = null;
+  }, [stopRecording]);
+
+  const startLiveMic = useCallback(async () => {
+    if (liveModeRef.current || !connectedRef.current) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new AudioContextCtor();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+
+      const source = ctx.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      liveStreamRef.current = stream;
+      audioContextRef.current = ctx;
+      analyserRef.current = analyser;
+      mediaSourceRef.current = source;
+      liveModeRef.current = true;
+      setLiveMode(true);
+
+      const samples = new Uint8Array(analyser.fftSize);
+      const tick = () => {
+        if (!liveModeRef.current || !analyserRef.current || !liveStreamRef.current) return;
+
+        analyserRef.current.getByteTimeDomainData(samples);
+        let sum = 0;
+        for (const value of samples) {
+          const centered = (value - 128) / 128;
+          sum += centered * centered;
+        }
+        const rms = Math.sqrt(sum / samples.length);
+        const now = performance.now();
+        const voiceDetected = rms > 0.035;
+
+        if (voiceDetected) {
+          lastSpeechAtRef.current = now;
+          if (!isRecordingRef.current) {
+            beginRecordingOnStream(liveStreamRef.current, false);
+          }
+        }
+
+        if (
+          isRecordingRef.current &&
+          now - lastSpeechAtRef.current > 900 &&
+          now - recordingStartedAtRef.current > 350
+        ) {
+          stopRecording();
+        }
+
+        vadFrameRef.current = requestAnimationFrame(tick);
+      };
+
+      lastSpeechAtRef.current = performance.now();
+      vadFrameRef.current = requestAnimationFrame(tick);
+    } catch (err) {
+      console.error("Mic access denied:", err);
+      stopLiveMic();
+    }
+  }, [beginRecordingOnStream, stopLiveMic, stopRecording]);
+
+  useEffect(() => () => stopLiveMic(), [stopLiveMic]);
 
   // Keyboard shortcut: Space
   useEffect(() => {
@@ -210,7 +363,7 @@ export default function InterviewSession({
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.code === "Space") stopRecording();
+      if (e.code === "Space" && !liveModeRef.current) stopRecording();
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -221,7 +374,8 @@ export default function InterviewSession({
     if (endingState !== "idle") return;
     setEndError(null);
 
-    if (isRecording) stopRecording();
+    if (isRecordingRef.current) stopRecording();
+    if (liveModeRef.current) stopLiveMic();
     stopCurrentAudio();
 
     const ws = wsRef.current;
@@ -236,6 +390,13 @@ export default function InterviewSession({
       setEndError("Could not send end-interview signal.");
     }
   };
+
+  const sendWhiteboardSnapshot = useCallback((snapshot: ArchitectureSnapshot) => {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "whiteboard", snapshot }));
+    }
+  }, []);
 
   // ── Render ───────────────────────────────────────────────────────────────────
 
@@ -318,7 +479,7 @@ export default function InterviewSession({
         {/* Canvas */}
         {showCanvas && (
           <div className="hidden lg:flex flex-1 border-r border-[#27272a]">
-            <ArchitectureCanvas />
+            <ArchitectureCanvas onSnapshotChange={sendWhiteboardSnapshot} />
           </div>
         )}
 
@@ -384,7 +545,7 @@ export default function InterviewSession({
                 onPointerDown={startRecording}
                 onPointerUp={stopRecording}
                 onPointerLeave={stopRecording}
-                disabled={!connected}
+                disabled={!connected || liveMode}
                 className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full transition-all ${
                   isRecording
                     ? "bg-red-500 scale-110 shadow-lg shadow-red-500/30"
@@ -401,11 +562,27 @@ export default function InterviewSession({
                 )}
               </button>
 
+              <button
+                onClick={liveMode ? stopLiveMic : startLiveMic}
+                disabled={!connected}
+                className={`h-9 rounded-md border px-3 text-xs font-medium transition-colors ${
+                  liveMode
+                    ? "border-green-400/30 bg-green-400/10 text-green-400"
+                    : "border-[#27272a] bg-[#111113] text-[#71717a] hover:border-[#3f3f46] hover:text-[#e8e8e8]"
+                } disabled:opacity-40`}
+              >
+                Live
+              </button>
+
               <div className="flex-1 text-xs text-[#52525b] text-center">
-                {isRecording
-                  ? "🔴 Recording — release to send"
+                {liveMode
+                  ? isRecording
+                    ? "Listening…"
+                    : "Live mic on"
+                  : isRecording
+                  ? "Recording — release to send"
                   : connected
-                  ? "Hold mic or Space bar to speak"
+                  ? "Hold mic or Space bar, or use Live"
                   : "Connecting…"}
               </div>
             </div>

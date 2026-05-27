@@ -127,7 +127,7 @@ class TestSend:
 
 class TestScriptedRespond:
     async def test_appends_assistant_message_to_history(self, session):
-        with patch.object(session, "_respond", new_callable=AsyncMock):
+        with patch.object(session, "_queue_response", new_callable=AsyncMock):
             await session._scripted_respond("Welcome to the interview!")
         assert any(
             m["role"] == "assistant" and m["content"] == "Welcome to the interview!"
@@ -135,9 +135,9 @@ class TestScriptedRespond:
         )
 
     async def test_calls_respond_with_same_text(self, session):
-        with patch.object(session, "_respond", new_callable=AsyncMock) as mock_respond:
+        with patch.object(session, "_queue_response", new_callable=AsyncMock) as mock_queue:
             await session._scripted_respond("Hello!")
-        mock_respond.assert_called_once_with("Hello!")
+        assert mock_queue.call_args[0][0] == "Hello!"
 
 
 # ── _tts (lines 257-267) ────────────────────────────────────────────────────
@@ -607,17 +607,17 @@ class TestStreamGenerate:
     async def test_calls_respond_for_each_sentence(self, session):
         chunks = [_make_chunk("Hello. "), _make_chunk("How are you? ")]
         with patch("app.ui_session._openai") as mock_openai, \
-             patch.object(session, "_respond", new_callable=AsyncMock) as mock_respond:
+             patch.object(session, "_queue_response", new_callable=AsyncMock) as mock_queue:
             mock_openai.chat.completions.create = AsyncMock(
                 return_value=_AsyncChunks(chunks)
             )
             await session._stream_generate("Test input")
-        assert mock_respond.call_count == 2
+        assert mock_queue.call_count == 2
 
     async def test_appends_user_message_to_history(self, session):
         chunks = [_make_chunk("Short reply.")]
         with patch("app.ui_session._openai") as mock_openai, \
-             patch.object(session, "_respond", new_callable=AsyncMock):
+             patch.object(session, "_queue_response", new_callable=AsyncMock):
             mock_openai.chat.completions.create = AsyncMock(
                 return_value=_AsyncChunks(chunks)
             )
@@ -628,7 +628,7 @@ class TestStreamGenerate:
     async def test_appends_assistant_reply_to_history(self, session):
         chunks = [_make_chunk("Short reply.")]
         with patch("app.ui_session._openai") as mock_openai, \
-             patch.object(session, "_respond", new_callable=AsyncMock):
+             patch.object(session, "_queue_response", new_callable=AsyncMock):
             mock_openai.chat.completions.create = AsyncMock(
                 return_value=_AsyncChunks(chunks)
             )
@@ -640,32 +640,32 @@ class TestStreamGenerate:
         session._barge_in.set()
         chunks = [_make_chunk("Hello.")]
         with patch("app.ui_session._openai") as mock_openai, \
-             patch.object(session, "_respond", new_callable=AsyncMock) as mock_respond:
+             patch.object(session, "_queue_response", new_callable=AsyncMock) as mock_queue:
             mock_openai.chat.completions.create = AsyncMock(
                 return_value=_AsyncChunks(chunks)
             )
             await session._stream_generate("Test input")
-        mock_respond.assert_not_called()
+        mock_queue.assert_not_called()
 
     async def test_falls_back_on_llm_error(self, session):
         with patch("app.ui_session._openai") as mock_openai, \
-             patch.object(session, "_respond", new_callable=AsyncMock) as mock_respond:
+             patch.object(session, "_queue_response", new_callable=AsyncMock) as mock_queue:
             mock_openai.chat.completions.create = AsyncMock(
                 side_effect=Exception("LLM down")
             )
             await session._stream_generate("Test")
-        mock_respond.assert_called_once_with("Could you elaborate on that?")
+        assert mock_queue.call_args[0][0] == "Could you elaborate on that?"
 
     async def test_handles_none_delta_content(self, session):
         chunk = MagicMock()
         chunk.choices[0].delta.content = None
         with patch("app.ui_session._openai") as mock_openai, \
-             patch.object(session, "_respond", new_callable=AsyncMock) as mock_respond:
+             patch.object(session, "_queue_response", new_callable=AsyncMock) as mock_queue:
             mock_openai.chat.completions.create = AsyncMock(
                 return_value=_AsyncChunks([chunk])
             )
             await session._stream_generate("Test input")
-        mock_respond.assert_not_called()
+        mock_queue.assert_not_called()
 
 
 # ── barge-in behavior ─────────────────────────────────────────────────────────
@@ -687,7 +687,7 @@ class TestBargIn:
     async def test_speaking_reset_after_process_audio(self, session):
         with patch.object(session, "_transcribe", new_callable=AsyncMock, return_value="Hi"), \
              patch.object(session, "_generate", new_callable=AsyncMock, return_value="OK"), \
-             patch.object(session, "_respond", new_callable=AsyncMock), \
+             patch.object(session, "_queue_response", new_callable=AsyncMock), \
              patch.object(session, "_check_phase_transition", new_callable=AsyncMock):
             await session.process_audio(b"audio", "audio/webm")
         assert session._speaking is False
