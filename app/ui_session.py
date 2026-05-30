@@ -19,8 +19,11 @@ import json
 import logging
 import re
 import time
+import uuid
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
@@ -64,6 +67,38 @@ def _sentence_chunks(buf: str) -> tuple[list[str], str]:
     return parts[:-1], parts[-1]
 
 
+def _summarize_whiteboard(snapshot: dict[str, Any]) -> str:
+    """Compress the React Flow canvas into a prompt-sized architecture summary."""
+    nodes = snapshot.get("nodes") or []
+    edges = snapshot.get("edges") or []
+    if not nodes and not edges:
+        return ""
+
+    node_bits: list[str] = []
+    label_by_id: dict[str, str] = {}
+    for node in nodes[:30]:
+        node_id = str(node.get("id") or "")
+        label = str(node.get("label") or node.get("type") or "component").strip()
+        kind = str(node.get("type") or "component").strip()
+        if node_id:
+            label_by_id[node_id] = label
+        node_bits.append(f"{label} ({kind})")
+
+    edge_bits: list[str] = []
+    for edge in edges[:40]:
+        source = str(edge.get("sourceLabel") or label_by_id.get(str(edge.get("source")), edge.get("source", ""))).strip()
+        target = str(edge.get("targetLabel") or label_by_id.get(str(edge.get("target")), edge.get("target", ""))).strip()
+        if source and target:
+            edge_bits.append(f"{source} -> {target}")
+
+    parts = []
+    if node_bits:
+        parts.append("components: " + ", ".join(node_bits))
+    if edge_bits:
+        parts.append("flows: " + "; ".join(edge_bits))
+    return "Whiteboard architecture shows " + ". ".join(parts) + "."
+
+
 _PHASE_INTRO = "INTRO"
 _PHASE_CONSTRAINTS = "CONSTRAINTS"
 _PHASE_DESIGN = "DESIGN"
@@ -72,6 +107,21 @@ _PHASE_DEEP_DIVE = "DEEP_DIVE"
 INTRO_MAX_EXCHANGES = 3
 CONSTRAINTS_DURATION_S = 4 * 60
 DESIGN_DURATION_S = 12 * 60
+
+REALTIME_CONVERSATION_PROMPT = (
+    "Realtime conversation mode: keep responses concise and conversational. "
+    "Ask at most one pointed follow-up at a time, avoid monologues, and let the "
+    "candidate drive the design unless they are stuck. If whiteboard context is "
+    "available, use it to ask specific questions about visible components, "
+    "connections, missing data flows, bottlenecks, and failure paths."
+)
+
+
+@dataclass
+class PendingSpeech:
+    generation_id: int
+    response_id: str
+    text: str
 
 
 class UISession:
@@ -114,9 +164,15 @@ class UISession:
         self._phase_start_at: float = 0.0
         self._intro_exchanges: int = 0
         self._problem: Optional[dict] = None
-        self._lock = asyncio.Lock()  # serialise audio processing
+        self._turn_lock = asyncio.Lock()  # serialise STT + LLM turn generation
         self._barge_in = asyncio.Event()
         self._speaking: bool = False
+        self._generation_id: int = 0
+        self._tts_queue: asyncio.Queue[Optional[PendingSpeech]] = asyncio.Queue()
+        self._tts_task: Optional[asyncio.Task] = None
+        self._send_lock = asyncio.Lock()
+        self._whiteboard_snapshot: Optional[dict[str, Any]] = None
+        self._whiteboard_summary: str = ""
         self._meter = CostMeter()
         self._run_id: Optional[int] = None
         self._persisted_end: bool = False
@@ -126,7 +182,9 @@ class UISession:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
+        self._ensure_tts_worker()
         self._problem = pick_problem(topic=self._topic, difficulty=self._difficulty)
+        self._history.append({"role": "system", "content": REALTIME_CONVERSATION_PROMPT})
         if self._difficulty in DIFFICULTY_PROMPTS:
             self._history.append({"role": "system", "content": DIFFICULTY_PROMPTS[self._difficulty]})
         self._history.append({"role": "system", "content": PHASE_PROMPTS[_PHASE_INTRO]})
@@ -143,7 +201,30 @@ class UISession:
 
     async def stop(self) -> None:
         self.is_active = False
+        await self.interrupt(notify_client=False)
+        if self._tts_task:
+            self._tts_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._tts_task
         await self._persist_end(status="abandoned" if not self._persisted_end else None)
+
+    async def interrupt(self, notify_client: bool = True) -> None:
+        """
+        Abort any in-flight bot response. The generation id is checked by the
+        LLM and TTS paths, so slow stale audio is dropped when it returns.
+        """
+        self._generation_id += 1
+        self._barge_in.set()
+        self._speaking = False
+        self._clear_tts_queue()
+        if notify_client and self.is_active:
+            await self._send({"type": "interrupt"})
+
+    def update_whiteboard(self, snapshot: dict[str, Any]) -> None:
+        self._whiteboard_snapshot = snapshot
+        self._whiteboard_summary = _summarize_whiteboard(snapshot)
+        if self._whiteboard_summary:
+            logger.info("[%s] Whiteboard updated: %s", self.session_id, self._whiteboard_summary)
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -211,25 +292,29 @@ class UISession:
 
     async def generate_scorecard(self) -> None:
         await self._send({"type": "scorecard_loading"})
-        scorecard_msgs = self._history + [{"role": "system", "content": SCORECARD_PROMPT}]
-        try:
-            completion = await _openai.chat.completions.create(
-                model=settings.llm_model,
-                messages=scorecard_msgs,
-                max_tokens=500,
-                temperature=0.2,
-            )
-            raw = completion.choices[0].message.content.strip()
-            usage = getattr(completion, "usage", None)
-            if usage is not None:
-                self._meter.record_llm(getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0))
-            m = re.search(r"\{.*\}", raw, re.DOTALL)
-            data = json.loads(m.group()) if m else {"summary": raw, "grade": "N/A", "hire": "N/A", "strengths": [], "gaps": [], "study": []}
-        except Exception as exc:
-            logger.error("[%s] Scorecard error: %s", self.session_id, exc)
-            data = {"error": "Could not generate scorecard. Please review the transcript manually."}
-        await self._send({"type": "scorecard", "data": data})
-        await self._persist_end(scorecard=data)
+        async with self._turn_lock:
+            scorecard_msgs = list(self._history)
+            if self._whiteboard_summary:
+                scorecard_msgs.append({"role": "system", "content": self._whiteboard_prompt()})
+            scorecard_msgs.append({"role": "system", "content": SCORECARD_PROMPT})
+            try:
+                completion = await _openai.chat.completions.create(
+                    model=settings.llm_model,
+                    messages=scorecard_msgs,
+                    max_tokens=500,
+                    temperature=0.2,
+                )
+                raw = completion.choices[0].message.content.strip()
+                usage = getattr(completion, "usage", None)
+                if usage is not None:
+                    self._meter.record_llm(getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0))
+                m = re.search(r"\{.*\}", raw, re.DOTALL)
+                data = json.loads(m.group()) if m else {"summary": raw, "grade": "N/A", "hire": "N/A", "strengths": [], "gaps": [], "study": []}
+            except Exception as exc:
+                logger.error("[%s] Scorecard error: %s", self.session_id, exc)
+                data = {"error": "Could not generate scorecard. Please review the transcript manually."}
+            await self._send({"type": "scorecard", "data": data})
+            await self._persist_end(scorecard=data)
 
     # ------------------------------------------------------------------
     # Audio ingestion
@@ -238,30 +323,48 @@ class UISession:
     async def process_audio(self, audio_bytes: bytes, mime_type: str = "audio/webm") -> None:
         if not self.is_active:
             return
-        if self._speaking:
-            self._barge_in.set()
-            await self._send({"type": "interrupt"})
-        async with self._lock:
+        await self.interrupt(notify_client=self._speaking)
+        generation_id = self._generation_id
+
+        async with self._turn_lock:
             self._barge_in.clear()
-            self._speaking = True
             try:
+                await self._send({"type": "processing_state", "state": "transcribing"})
                 transcript = await self._transcribe(audio_bytes, mime_type)
                 if not transcript:
+                    await self._send({
+                        "type": "processing_state",
+                        "state": "idle",
+                        "message": "No speech detected.",
+                    })
+                    return
+                if generation_id != self._generation_id or self._barge_in.is_set():
                     return
 
                 await self._send({"type": "transcript", "text": transcript})
+                await self._send({"type": "processing_state", "state": "thinking"})
 
                 if self._phase == _PHASE_INTRO:
                     self._intro_exchanges += 1
 
                 if settings.llm_streaming:
-                    await self._stream_generate(transcript)
+                    await self._stream_generate(transcript, generation_id=generation_id)
                 else:
                     response = await self._generate(transcript)
-                    await self._respond(response)
-                await self._check_phase_transition()
+                    if generation_id == self._generation_id and not self._barge_in.is_set():
+                        await self._queue_response(response, generation_id)
+                if generation_id == self._generation_id and not self._barge_in.is_set():
+                    await self._check_phase_transition()
+            except Exception as exc:
+                logger.error("[%s] Audio processing error: %s", self.session_id, exc)
+                await self._send({
+                    "type": "processing_state",
+                    "state": "error",
+                    "message": "Audio processing failed.",
+                })
             finally:
-                self._speaking = False
+                if self._tts_queue.empty():
+                    self._speaking = False
 
     # ------------------------------------------------------------------
     # Phase management
@@ -332,6 +435,80 @@ class UISession:
     # AI pipeline
     # ------------------------------------------------------------------
 
+    def _active_context(self, user_text: str) -> list[dict]:
+        # Trim context with relevance scoring while keeping the newest user turn
+        # and the current canvas state pinned in the prompt.
+        active_ctx = prioritize(self._history[:-1], user_text)
+        if self._whiteboard_summary:
+            active_ctx.append({"role": "system", "content": self._whiteboard_prompt()})
+        active_ctx.append(self._history[-1])
+        return active_ctx
+
+    def _whiteboard_prompt(self) -> str:
+        return (
+            f"{self._whiteboard_summary} Use this as the candidate's current diagram. "
+            "When useful, ask one specific question about the drawn architecture instead "
+            "of a generic system-design follow-up."
+        )
+
+    def _ensure_tts_worker(self) -> None:
+        if self._tts_task is None or self._tts_task.done():
+            self._tts_task = asyncio.create_task(self._tts_worker())
+
+    def _clear_tts_queue(self) -> None:
+        while True:
+            try:
+                self._tts_queue.get_nowait()
+                self._tts_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+
+    async def _queue_response(self, text: str, generation_id: Optional[int] = None) -> None:
+        text = text.strip()
+        if not text:
+            return
+        generation_id = self._generation_id if generation_id is None else generation_id
+        if generation_id != self._generation_id or self._barge_in.is_set():
+            return
+
+        response_id = f"{generation_id}:{uuid.uuid4().hex[:8]}"
+        await self._send({"type": "response", "text": text, "response_id": response_id})
+        self._speaking = True
+        self._ensure_tts_worker()
+        await self._tts_queue.put(PendingSpeech(generation_id, response_id, text))
+
+    async def _tts_worker(self) -> None:
+        while self.is_active:
+            item = await self._tts_queue.get()
+            try:
+                if item is None:
+                    return
+                if item.generation_id != self._generation_id or self._barge_in.is_set():
+                    continue
+
+                audio_bytes = await self._tts(item.text)
+                if (
+                    audio_bytes
+                    and item.generation_id == self._generation_id
+                    and not self._barge_in.is_set()
+                ):
+                    await self._send({
+                        "type": "response_audio",
+                        "response_id": item.response_id,
+                        "audio": base64.b64encode(audio_bytes).decode(),
+                    })
+            finally:
+                self._tts_queue.task_done()
+                if self._tts_queue.empty():
+                    self._speaking = False
+                    if (
+                        self.is_active
+                        and item is not None
+                        and item.generation_id == self._generation_id
+                        and not self._barge_in.is_set()
+                    ):
+                        await self._send({"type": "processing_state", "state": "idle"})
+
     async def _transcribe(self, audio_bytes: bytes, mime_type: str) -> Optional[str]:
         ext = mime_type.split("/")[-1].split(";")[0]
         approx_seconds = max(0.5, len(audio_bytes) / 32000.0)  # ~32 KB/s for compressed webm
@@ -349,17 +526,19 @@ class UISession:
             logger.error("[%s] Transcription error: %s", self.session_id, exc)
             return None
 
-    async def _stream_generate(self, user_text: str) -> None:
+    async def _stream_generate(self, user_text: str, generation_id: Optional[int] = None) -> None:
         """Stream LLM tokens, deliver TTS per completed sentence, abort on barge-in."""
+        generation_id = self._generation_id if generation_id is None else generation_id
         self._history.append({"role": "user", "content": user_text})
-        active_ctx = prioritize(self._history[:-1], user_text) + [self._history[-1]]
+        active_ctx = self._active_context(user_text)
         full_reply = ""
+        delivered_reply = ""
         buf = ""
         try:
             stream = await _openai.chat.completions.create(
                 model=settings.llm_model,
                 messages=active_ctx,
-                max_tokens=180,
+                max_tokens=120,
                 temperature=0.8,
                 stream=True,
             )
@@ -367,39 +546,44 @@ class UISession:
                 if self._barge_in.is_set():
                     logger.info("[%s] Barge-in: aborting generation.", self.session_id)
                     break
+                if generation_id != self._generation_id:
+                    logger.info("[%s] Stale generation discarded.", self.session_id)
+                    break
                 delta = chunk.choices[0].delta.content or ""
                 full_reply += delta
                 buf += delta
                 sentences, buf = _sentence_chunks(buf)
                 for sent in sentences:
-                    if not self._barge_in.is_set():
-                        self._speaking = True
-                        await self._respond(sent)
-            if buf.strip() and not self._barge_in.is_set():
-                self._speaking = True
-                await self._respond(buf.strip())
+                    if not self._barge_in.is_set() and generation_id == self._generation_id:
+                        delivered_reply += sent + " "
+                        await self._queue_response(sent, generation_id)
+            if buf.strip() and not self._barge_in.is_set() and generation_id == self._generation_id:
+                delivered_reply += buf.strip()
+                await self._queue_response(buf.strip(), generation_id)
         except Exception as exc:
             logger.error("[%s] Streaming LLM error: %s", self.session_id, exc)
-            if not self._barge_in.is_set():
-                await self._respond("Could you elaborate on that?")
-        if full_reply:
-            self._history.append({"role": "assistant", "content": full_reply})
-            logger.info("[%s] Response (streamed): %s", self.session_id, full_reply)
+            if not self._barge_in.is_set() and generation_id == self._generation_id:
+                fallback = "Could you elaborate on that?"
+                delivered_reply = fallback
+                await self._queue_response(fallback, generation_id)
+        history_reply = delivered_reply.strip()
+        if not history_reply and generation_id == self._generation_id and not self._barge_in.is_set():
+            history_reply = full_reply.strip()
+        if history_reply:
+            self._history.append({"role": "assistant", "content": history_reply})
+            logger.info("[%s] Response (streamed): %s", self.session_id, history_reply)
             input_est = estimate_tokens(" ".join(m.get("content", "") for m in active_ctx))
-            output_est = estimate_tokens(full_reply)
+            output_est = estimate_tokens(history_reply)
             self._meter.record_llm(input_est, output_est)
 
     async def _generate(self, user_text: str) -> str:
         self._history.append({"role": "user", "content": user_text})
-        # Trim context to TOKEN_BUDGET using cosine-similarity scoring so the
-        # prompt stays lean regardless of conversation length. Full history is
-        # still preserved in self._history for scorecard generation.
-        active_ctx = prioritize(self._history[:-1], user_text) + [self._history[-1]]
+        active_ctx = self._active_context(user_text)
         try:
             completion = await _openai.chat.completions.create(
                 model=settings.llm_model,
                 messages=active_ctx,
-                max_tokens=180,
+                max_tokens=120,
                 temperature=0.8,
             )
             reply = completion.choices[0].message.content.strip()
@@ -436,11 +620,12 @@ class UISession:
 
     async def _scripted_respond(self, text: str) -> None:
         self._history.append({"role": "assistant", "content": text})
-        await self._respond(text)
+        await self._queue_response(text, self._generation_id)
 
     async def _send(self, data: dict) -> None:
         try:
-            await self.ws.send_json(data)
+            async with self._send_lock:
+                await self.ws.send_json(data)
         except Exception as exc:
             logger.warning("[%s] WS send failed: %s", self.session_id, exc)
             self.is_active = False

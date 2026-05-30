@@ -298,11 +298,27 @@ async def interview_websocket(
 
         while True:
             data = await websocket.receive_json()
-            if data.get("type") == "audio":
-                audio_bytes = base64.b64decode(data["data"])
+            msg_type = data.get("type")
+            if msg_type == "speech_start":
+                asyncio.create_task(session.interrupt())
+            elif msg_type == "whiteboard":
+                snapshot = data.get("snapshot")
+                if isinstance(snapshot, dict):
+                    session.update_whiteboard(snapshot)
+            elif msg_type == "audio":
+                try:
+                    audio_bytes = base64.b64decode(data["data"], validate=True)
+                except Exception:
+                    await websocket.send_json({"type": "error", "message": "Invalid audio payload."})
+                    continue
                 mime = data.get("mime", "audio/webm")
+                await websocket.send_json({
+                    "type": "audio_received",
+                    "bytes": len(audio_bytes),
+                    "mime": mime,
+                })
                 asyncio.create_task(session.process_audio(audio_bytes, mime))
-            elif data.get("type") == "end":
+            elif msg_type == "end":
                 asyncio.create_task(session.generate_scorecard())
 
     except WebSocketDisconnect:

@@ -2,12 +2,49 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
-import ArchitectureCanvas from "./ArchitectureCanvas";
+import ArchitectureCanvas, { type ArchitectureSnapshot } from "./ArchitectureCanvas";
 import { getProblemBySlug, DIFFICULTY_COLORS } from "@/lib/problems";
 import { getToken } from "@/lib/api";
 
 type Phase = "INTRO" | "CONSTRAINTS" | "DESIGN" | "DEEP_DIVE" | "DONE";
 type Message = { role: "user" | "assistant"; content: string; timestamp: number };
+type AudioPipelineState =
+  | "idle"
+  | "starting"
+  | "recording"
+  | "uploading"
+  | "transcribing"
+  | "thinking"
+  | "speaking"
+  | "scoring"
+  | "error";
+
+type BrowserSpeechRecognitionResult = {
+  isFinal: boolean;
+  0: { transcript: string };
+};
+
+type BrowserSpeechRecognitionEvent = Event & {
+  resultIndex: number;
+  results: {
+    length: number;
+    [index: number]: BrowserSpeechRecognitionResult;
+  };
+};
+
+type BrowserSpeechRecognition = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: BrowserSpeechRecognitionEvent) => void) | null;
+  onerror: ((event: Event) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+
+type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition;
 
 const PHASE_LABELS: Record<Phase, string> = {
   INTRO: "Intro",
@@ -25,7 +62,40 @@ const PHASE_COLORS: Record<Phase, string> = {
   DONE: "text-green-400 bg-green-400/10 border-green-400/20",
 };
 
+const AUDIO_PIPELINE_LABELS: Record<AudioPipelineState, string> = {
+  idle: "Ready",
+  starting: "Opening microphone…",
+  recording: "Recording…",
+  uploading: "Uploading audio…",
+  transcribing: "Transcribing audio…",
+  thinking: "Alex is thinking…",
+  speaking: "Alex is speaking…",
+  scoring: "Generating scorecard…",
+  error: "Audio pipeline needs attention",
+};
+
+const AUDIO_PIPELINE_PROGRESS: Record<AudioPipelineState, string> = {
+  idle: "0%",
+  starting: "12%",
+  recording: "28%",
+  uploading: "45%",
+  transcribing: "62%",
+  thinking: "78%",
+  speaking: "92%",
+  scoring: "86%",
+  error: "100%",
+};
+
 const WS_URL = process.env.NEXT_PUBLIC_API_URL ?? "ws://localhost:8000";
+
+function getSpeechRecognitionCtor(): BrowserSpeechRecognitionConstructor | null {
+  if (typeof window === "undefined") return null;
+  const speechWindow = window as unknown as {
+    SpeechRecognition?: BrowserSpeechRecognitionConstructor;
+    webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
+  };
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
+}
 
 export default function InterviewSession({
   sessionId,
@@ -41,23 +111,57 @@ export default function InterviewSession({
   const [phase, setPhase] = useState<Phase>("INTRO");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isRecording, setIsRecording] = useState(false);
+  const [liveTranscript, setLiveTranscript] = useState("");
   const [alexSpeaking, setAlexSpeaking] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [liveMode, setLiveMode] = useState(false);
   const [scorecard, setScorecard] = useState<ScorecardData | null>(null);
   const [showCanvas, setShowCanvas] = useState(true);
   const [endingState, setEndingState] = useState<"idle" | "ending" | "scoring">("idle");
   const [endError, setEndError] = useState<string | null>(null);
+  const [audioStatus, setAudioStatus] = useState<AudioPipelineState>("idle");
+  const [audioError, setAudioError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const audioQueueRef = useRef<string[]>([]);
   const audioPlayingRef = useRef(false);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioStatusRef = useRef<AudioPipelineState>("idle");
+  const connectedRef = useRef(false);
+  const isRecordingRef = useRef(false);
+  const endingStateRef = useRef<"idle" | "ending" | "scoring">("idle");
+  const recordingStartPendingRef = useRef(false);
+  const stopRequestedRef = useRef(false);
+  const pendingEndRef = useRef(false);
+  const liveModeRef = useRef(false);
+  const liveStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const mediaSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const vadFrameRef = useRef<number | null>(null);
+  const speechRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const speechRecognitionRunningRef = useRef(false);
+  const speechRecognitionSessionRef = useRef(0);
+  const finalSpeechTextRef = useRef("");
+  const lastSpeechAtRef = useRef(0);
+  const recordingStartedAtRef = useRef(0);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+
+  const setAudioPipeline = useCallback((state: AudioPipelineState, error?: string) => {
+    audioStatusRef.current = state;
+    setAudioStatus(state);
+    if (error) {
+      setAudioError(error);
+    } else if (state !== "error") {
+      setAudioError(null);
+    }
+  }, []);
 
   // ── WebSocket ────────────────────────────────────────────────────────────────
 
-  const connect = useCallback(() => {
+  const connect = useCallback((): WebSocket => {
     const token = getToken() ?? "";
     const url =
       `${WS_URL.replace(/^http/, "ws")}/ws/interview` +
@@ -69,19 +173,53 @@ export default function InterviewSession({
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
-    ws.onopen = () => setConnected(true);
-    ws.onclose = () => { setConnected(false); wsRef.current = null; };
+    ws.onopen = () => {
+      if (wsRef.current !== ws) return;
+      setConnected(true);
+      setAudioPipeline("idle");
+    };
+    ws.onclose = () => {
+      if (wsRef.current !== ws) return;
+      setConnected(false);
+      wsRef.current = null;
+      if (
+        audioStatusRef.current !== "idle" &&
+        audioStatusRef.current !== "error" &&
+        endingStateRef.current === "idle"
+      ) {
+        setAudioPipeline("error", "Connection closed before audio processing finished.");
+      }
+    };
 
     ws.onmessage = async (ev) => {
+      if (wsRef.current !== ws) return;
       const msg = JSON.parse(ev.data);
 
       if (msg.type === "session_started") {
         setPhase(msg.phase ?? "INTRO");
       }
+      if (msg.type === "audio_received") {
+        setAudioPipeline("transcribing");
+      }
+      if (msg.type === "processing_state") {
+        const nextState = msg.state as AudioPipelineState;
+        if (nextState === "idle" && audioPlayingRef.current) {
+          return;
+        }
+        if (nextState in AUDIO_PIPELINE_LABELS) {
+          setAudioPipeline(nextState, msg.message);
+        }
+      }
       if (msg.type === "phase_change") {
         setPhase(msg.phase as Phase);
       }
       if (msg.type === "transcript") {
+        setAudioPipeline("thinking");
+        if (!isRecordingRef.current) {
+          speechRecognitionSessionRef.current += 1;
+          finalSpeechTextRef.current = "";
+          setLiveTranscript("");
+        }
         setMessages((prev) => [
           ...prev,
           { role: "user", content: msg.text, timestamp: Date.now() },
@@ -92,19 +230,26 @@ export default function InterviewSession({
           ...prev,
           { role: "assistant", content: msg.text, timestamp: Date.now() },
         ]);
+        setAudioPipeline("speaking");
         if (msg.audio) {
           queueAudio(msg.audio);
         }
+      }
+      if (msg.type === "response_audio" && msg.audio) {
+        setAudioPipeline("speaking");
+        queueAudio(msg.audio);
       }
       if (msg.type === "interrupt") {
         stopCurrentAudio();
       }
       if (msg.type === "scorecard_loading") {
         setEndingState("scoring");
+        setAudioPipeline("scoring");
       }
       if (msg.type === "scorecard") {
         setPhase("DONE");
         setEndingState("idle");
+        setAudioPipeline("idle");
         try {
           const parsed = typeof msg.data === "string" ? JSON.parse(msg.data) : msg.data;
           setScorecard(parsed as ScorecardData);
@@ -113,6 +258,7 @@ export default function InterviewSession({
         }
       }
       if (msg.type === "error" || msg.type === "quota_exceeded") {
+        setAudioPipeline("error", msg.message ?? "Session could not start.");
         setMessages((prev) => [
           ...prev,
           {
@@ -123,83 +269,456 @@ export default function InterviewSession({
         ]);
       }
     };
+    return ws;
   }, [problem, difficulty, problemSlug]);
 
   useEffect(() => {
-    connect();
-    return () => { wsRef.current?.close(); };
+    const ws = connect();
+    return () => {
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
+      ws.close();
+    };
   }, [connect]);
+
+  useEffect(() => {
+    connectedRef.current = connected;
+  }, [connected]);
+
+  useEffect(() => {
+    liveModeRef.current = liveMode;
+  }, [liveMode]);
+
+  useEffect(() => {
+    endingStateRef.current = endingState;
+  }, [endingState]);
 
   // Auto-scroll transcript
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, liveTranscript]);
 
   // ── Audio playback ───────────────────────────────────────────────────────────
 
   const playNextInQueue = useCallback(() => {
     if (audioQueueRef.current.length === 0) {
       audioPlayingRef.current = false;
+      currentAudioRef.current = null;
       setAlexSpeaking(false);
+      if (audioStatusRef.current === "speaking") {
+        setAudioPipeline("idle");
+      }
       return;
     }
     const b64 = audioQueueRef.current.shift()!;
     audioPlayingRef.current = true;
     setAlexSpeaking(true);
+    setAudioPipeline("speaking");
 
     const audio = new Audio(`data:audio/mp3;base64,${b64}`);
+    currentAudioRef.current = audio;
     audio.onended = playNextInQueue;
     audio.onerror = playNextInQueue;
     audio.play().catch(() => playNextInQueue());
-  }, []);
+  }, [setAudioPipeline]);
 
   const queueAudio = useCallback(
     (b64: string) => {
       audioQueueRef.current.push(b64);
+      setAudioPipeline("speaking");
       if (!audioPlayingRef.current) playNextInQueue();
     },
-    [playNextInQueue]
+    [playNextInQueue, setAudioPipeline]
   );
 
-  const stopCurrentAudio = () => {
+  const stopCurrentAudio = useCallback(() => {
     audioQueueRef.current = [];
+    const audio = currentAudioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      currentAudioRef.current = null;
+    }
     audioPlayingRef.current = false;
     setAlexSpeaking(false);
-  };
+    if (audioStatusRef.current === "speaking") {
+      setAudioPipeline("idle");
+    }
+  }, [setAudioPipeline]);
 
-  // ── Push-to-talk recording ───────────────────────────────────────────────────
+  // ── Realtime speech capture ─────────────────────────────────────────────────
 
-  const startRecording = useCallback(async () => {
-    if (isRecording || !connected) return;
+  const recorderMime = () =>
+    typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/webm")
+      ? "audio/webm"
+      : "";
+
+  const sendSpeechStart = useCallback(() => {
+    stopCurrentAudio();
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "speech_start" }));
+    }
+  }, [stopCurrentAudio]);
+
+  const clearLiveTranscriptDraft = useCallback(() => {
+    speechRecognitionSessionRef.current += 1;
+    finalSpeechTextRef.current = "";
+    setLiveTranscript("");
+  }, []);
+
+  const stopLiveTranscription = useCallback(() => {
+    const recognition = speechRecognitionRef.current;
+    if (!recognition || !speechRecognitionRunningRef.current) return;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      recognition.stop();
+    } catch {
+      speechRecognitionRunningRef.current = false;
+    }
+  }, []);
+
+  const abortLiveTranscription = useCallback(() => {
+    const recognition = speechRecognitionRef.current;
+    if (recognition && speechRecognitionRunningRef.current) {
+      try {
+        recognition.abort();
+      } catch {
+        // Browser recognizers can throw when aborting during startup.
+      }
+    }
+    speechRecognitionRunningRef.current = false;
+    clearLiveTranscriptDraft();
+  }, [clearLiveTranscriptDraft]);
+
+  const startLiveTranscription = useCallback(() => {
+    const Recognition = getSpeechRecognitionCtor();
+    if (!Recognition || speechRecognitionRunningRef.current) return;
+
+    const sessionId = speechRecognitionSessionRef.current + 1;
+    speechRecognitionSessionRef.current = sessionId;
+    finalSpeechTextRef.current = "";
+    setLiveTranscript("");
+
+    const recognition = new Recognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+    recognition.onresult = (event) => {
+      if (speechRecognitionSessionRef.current !== sessionId) return;
+
+      let interim = "";
+      let finalText = finalSpeechTextRef.current;
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const text = result[0]?.transcript ?? "";
+        if (result.isFinal) {
+          finalText = `${finalText} ${text}`.trim();
+        } else {
+          interim = `${interim} ${text}`.trim();
+        }
+      }
+
+      finalSpeechTextRef.current = finalText;
+      setLiveTranscript(`${finalText} ${interim}`.trim());
+    };
+    recognition.onerror = () => {
+      speechRecognitionRunningRef.current = false;
+    };
+    recognition.onend = () => {
+      speechRecognitionRunningRef.current = false;
+    };
+
+    speechRecognitionRef.current = recognition;
+    try {
+      recognition.start();
+      speechRecognitionRunningRef.current = true;
+    } catch {
+      speechRecognitionRunningRef.current = false;
+    }
+  }, []);
+
+  const sendEndNow = useCallback(() => {
+    pendingEndRef.current = false;
+
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      setEndingState("idle");
+      setEndError("Not connected. Refresh the page and try again.");
+      setAudioPipeline("error", "Not connected. Refresh the page and try again.");
+      return;
+    }
+
+    try {
+      ws.send(JSON.stringify({ type: "end" }));
+      setEndingState("ending");
+      setAudioPipeline("scoring");
+    } catch {
+      setEndingState("idle");
+      setEndError("Could not send end-interview signal.");
+      setAudioPipeline("error", "Could not send end-interview signal.");
+    }
+  }, [setAudioPipeline]);
+
+  const beginRecordingOnStream = useCallback(
+    (stream: MediaStream, stopTracksOnStop: boolean) => {
+      recordingStartPendingRef.current = false;
+
+      if (isRecordingRef.current || !connectedRef.current) {
+        if (stopTracksOnStop) stream.getTracks().forEach((t) => t.stop());
+        if (!connectedRef.current) {
+          setAudioPipeline("error", "Not connected. Audio was not sent.");
+        }
+        if (pendingEndRef.current) sendEndNow();
+        return;
+      }
+
+      const mime = recorderMime();
+      let mr: MediaRecorder;
+      try {
+        mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      } catch {
+        if (stopTracksOnStop) stream.getTracks().forEach((t) => t.stop());
+        setAudioPipeline("error", "Could not start the browser audio recorder.");
+        if (pendingEndRef.current) sendEndNow();
+        return;
+      }
       chunksRef.current = [];
-      mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      recordingStartedAtRef.current = performance.now();
+
+      mr.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      mr.onerror = () => {
+        setAudioPipeline("error", "Recording failed before audio could be sent.");
+      };
       mr.onstop = () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        stopLiveTranscription();
+        if (stopTracksOnStop) stream.getTracks().forEach((t) => t.stop());
+
+        const blobType = mr.mimeType || mime || "audio/webm";
+        const blob = new Blob(chunksRef.current, { type: blobType });
+        chunksRef.current = [];
+        isRecordingRef.current = false;
+        stopRequestedRef.current = false;
+        mediaRecorderRef.current = null;
+        setIsRecording(false);
+
+        const finishPendingEnd = () => {
+          if (pendingEndRef.current) {
+            window.setTimeout(sendEndNow, 0);
+          }
+        };
+
+        if (blob.size < 64) {
+          clearLiveTranscriptDraft();
+          setAudioPipeline("error", "Recording was too short to process.");
+          finishPendingEnd();
+          return;
+        }
+
+        setAudioPipeline("uploading");
         const reader = new FileReader();
         reader.onloadend = () => {
-          const b64 = (reader.result as string).split(",")[1];
-          wsRef.current?.send(JSON.stringify({ type: "audio", data: b64, mime: "audio/webm" }));
+          const b64 = String(reader.result).split(",")[1];
+          if (!b64) {
+            setAudioPipeline("error", "Could not encode the recorded audio.");
+            finishPendingEnd();
+            return;
+          }
+
+          const ws = wsRef.current;
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            setAudioPipeline("error", "Not connected. Audio was not sent.");
+            finishPendingEnd();
+            return;
+          }
+
+          try {
+            ws.send(JSON.stringify({ type: "audio", data: b64, mime: blobType }));
+            setAudioPipeline("transcribing");
+          } catch {
+            setAudioPipeline("error", "Could not send recorded audio.");
+          }
+          finishPendingEnd();
+        };
+        reader.onerror = () => {
+          setAudioPipeline("error", "Could not read recorded audio.");
+          finishPendingEnd();
         };
         reader.readAsDataURL(blob);
       };
-      mr.start();
-      mediaRecorderRef.current = mr;
-      setIsRecording(true);
-    } catch (err) {
-      console.error("Mic access denied:", err);
-    }
-  }, [isRecording, connected]);
+
+      sendSpeechStart();
+      startLiveTranscription();
+      try {
+        mr.start(250);
+        mediaRecorderRef.current = mr;
+        isRecordingRef.current = true;
+        setIsRecording(true);
+        setAudioPipeline("recording");
+      } catch {
+        stopLiveTranscription();
+        if (stopTracksOnStop) stream.getTracks().forEach((t) => t.stop());
+        setAudioPipeline("error", "Could not start recording.");
+        if (pendingEndRef.current) sendEndNow();
+        return;
+      }
+
+      if (stopRequestedRef.current) {
+        window.setTimeout(() => {
+          if (mediaRecorderRef.current === mr && mr.state !== "inactive") {
+            try {
+              mr.requestData();
+            } catch {
+              // Some browsers throw if data is not ready yet.
+            }
+            mr.stop();
+          }
+        }, 350);
+      }
+    },
+    [
+      clearLiveTranscriptDraft,
+      sendEndNow,
+      sendSpeechStart,
+      setAudioPipeline,
+      startLiveTranscription,
+      stopLiveTranscription,
+    ]
+  );
 
   const stopRecording = useCallback(() => {
-    if (!isRecording) return;
-    mediaRecorderRef.current?.stop();
-    mediaRecorderRef.current = null;
-    setIsRecording(false);
-  }, [isRecording]);
+    if (recordingStartPendingRef.current && !isRecordingRef.current) {
+      stopRequestedRef.current = true;
+      setAudioPipeline("uploading");
+      return;
+    }
+    if (!isRecordingRef.current) return;
+    stopRequestedRef.current = true;
+    const mr = mediaRecorderRef.current;
+    if (mr && mr.state !== "inactive") {
+      try {
+        mr.requestData();
+      } catch {
+        // Data may already have been flushed by a recent timeslice.
+      }
+      setAudioPipeline("uploading");
+      mr.stop();
+    }
+  }, [setAudioPipeline]);
+
+  const startRecording = useCallback(async () => {
+    if (
+      isRecordingRef.current ||
+      recordingStartPendingRef.current ||
+      liveModeRef.current ||
+      !connectedRef.current
+    ) {
+      return;
+    }
+
+    recordingStartPendingRef.current = true;
+    stopRequestedRef.current = false;
+    setAudioPipeline("starting");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      beginRecordingOnStream(stream, true);
+    } catch (err) {
+      recordingStartPendingRef.current = false;
+      stopRequestedRef.current = false;
+      setAudioPipeline("error", "Microphone access failed. Check browser permissions.");
+      console.error("Mic access denied:", err);
+      if (pendingEndRef.current) sendEndNow();
+    }
+  }, [beginRecordingOnStream, sendEndNow, setAudioPipeline]);
+
+  const stopLiveMic = useCallback(() => {
+    liveModeRef.current = false;
+    setLiveMode(false);
+
+    if (vadFrameRef.current !== null) {
+      cancelAnimationFrame(vadFrameRef.current);
+      vadFrameRef.current = null;
+    }
+    if (isRecordingRef.current || recordingStartPendingRef.current) {
+      stopRecording();
+    } else {
+      abortLiveTranscription();
+    }
+
+    liveStreamRef.current?.getTracks().forEach((track) => track.stop());
+    liveStreamRef.current = null;
+    mediaSourceRef.current?.disconnect();
+    mediaSourceRef.current = null;
+    analyserRef.current = null;
+    audioContextRef.current?.close().catch(() => {});
+    audioContextRef.current = null;
+  }, [abortLiveTranscription, stopRecording]);
+
+  const startLiveMic = useCallback(async () => {
+    if (liveModeRef.current || !connectedRef.current) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new AudioContextCtor();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+
+      const source = ctx.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      liveStreamRef.current = stream;
+      audioContextRef.current = ctx;
+      analyserRef.current = analyser;
+      mediaSourceRef.current = source;
+      liveModeRef.current = true;
+      setLiveMode(true);
+      setAudioPipeline("idle");
+
+      const samples = new Uint8Array(analyser.fftSize);
+      const tick = () => {
+        if (!liveModeRef.current || !analyserRef.current || !liveStreamRef.current) return;
+
+        analyserRef.current.getByteTimeDomainData(samples);
+        let sum = 0;
+        for (const value of samples) {
+          const centered = (value - 128) / 128;
+          sum += centered * centered;
+        }
+        const rms = Math.sqrt(sum / samples.length);
+        const now = performance.now();
+        const voiceDetected = rms > 0.035;
+
+        if (voiceDetected) {
+          lastSpeechAtRef.current = now;
+          if (!isRecordingRef.current && !recordingStartPendingRef.current) {
+            beginRecordingOnStream(liveStreamRef.current, false);
+          }
+        }
+
+        if (
+          isRecordingRef.current &&
+          now - lastSpeechAtRef.current > 900 &&
+          now - recordingStartedAtRef.current > 350
+        ) {
+          stopRecording();
+        }
+
+        vadFrameRef.current = requestAnimationFrame(tick);
+      };
+
+      lastSpeechAtRef.current = performance.now();
+      vadFrameRef.current = requestAnimationFrame(tick);
+    } catch (err) {
+      setAudioPipeline("error", "Microphone access failed. Check browser permissions.");
+      console.error("Mic access denied:", err);
+      stopLiveMic();
+    }
+  }, [beginRecordingOnStream, setAudioPipeline, stopLiveMic, stopRecording]);
+
+  useEffect(() => () => stopLiveMic(), [stopLiveMic]);
 
   // Keyboard shortcut: Space
   useEffect(() => {
@@ -210,7 +729,7 @@ export default function InterviewSession({
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.code === "Space") stopRecording();
+      if (e.code === "Space" && !liveModeRef.current) stopRecording();
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -220,22 +739,39 @@ export default function InterviewSession({
   const sendEndInterview = () => {
     if (endingState !== "idle") return;
     setEndError(null);
-
-    if (isRecording) stopRecording();
+    pendingEndRef.current = true;
     stopCurrentAudio();
 
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      setEndError("Not connected. Refresh the page and try again.");
+    const hasActiveCapture =
+      isRecordingRef.current || recordingStartPendingRef.current || liveModeRef.current;
+    if (isRecordingRef.current || recordingStartPendingRef.current) {
+      setEndingState("ending");
+      stopRecording();
+      if (liveModeRef.current) stopLiveMic();
+      window.setTimeout(() => {
+        if (
+          pendingEndRef.current &&
+          !isRecordingRef.current &&
+          !recordingStartPendingRef.current
+        ) {
+          sendEndNow();
+        }
+      }, 2500);
       return;
     }
-    try {
-      ws.send(JSON.stringify({ type: "end" }));
-      setEndingState("ending");
-    } catch {
-      setEndError("Could not send end-interview signal.");
+
+    if (hasActiveCapture) {
+      stopLiveMic();
     }
+    sendEndNow();
   };
+
+  const sendWhiteboardSnapshot = useCallback((snapshot: ArchitectureSnapshot) => {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "whiteboard", snapshot }));
+    }
+  }, []);
 
   // ── Render ───────────────────────────────────────────────────────────────────
 
@@ -318,7 +854,7 @@ export default function InterviewSession({
         {/* Canvas */}
         {showCanvas && (
           <div className="hidden lg:flex flex-1 border-r border-[#27272a]">
-            <ArchitectureCanvas />
+            <ArchitectureCanvas onSnapshotChange={sendWhiteboardSnapshot} />
           </div>
         )}
 
@@ -342,7 +878,7 @@ export default function InterviewSession({
 
           {/* Messages */}
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
-            {messages.length === 0 && (
+            {messages.length === 0 && !liveTranscript && (
               <div className="flex h-full flex-col items-center justify-center text-center">
                 <div className="mb-3 text-3xl">🎙️</div>
                 <p className="text-sm text-[#71717a]">
@@ -373,6 +909,13 @@ export default function InterviewSession({
                 </div>
               </div>
             ))}
+            {liveTranscript && (
+              <div className="flex justify-end">
+                <div className="max-w-[85%] rounded-2xl rounded-tr-sm border border-[#3f3f46] bg-[#27272a]/70 px-4 py-2.5 text-sm leading-relaxed text-[#e8e8e8]">
+                  {liveTranscript}
+                </div>
+              </div>
+            )}
             <div ref={transcriptEndRef} />
           </div>
 
@@ -381,10 +924,23 @@ export default function InterviewSession({
             <div className="flex items-center gap-3">
               {/* Mic button */}
               <button
-                onPointerDown={startRecording}
-                onPointerUp={stopRecording}
-                onPointerLeave={stopRecording}
-                disabled={!connected}
+                onPointerDown={(event) => {
+                  event.currentTarget.setPointerCapture?.(event.pointerId);
+                  startRecording();
+                }}
+                onPointerUp={(event) => {
+                  try {
+                    event.currentTarget.releasePointerCapture?.(event.pointerId);
+                  } catch {
+                    // Pointer capture may already be released by the browser.
+                  }
+                  stopRecording();
+                }}
+                onPointerCancel={stopRecording}
+                onLostPointerCapture={() => {
+                  if (!liveModeRef.current) stopRecording();
+                }}
+                disabled={!connected || liveMode}
                 className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full transition-all ${
                   isRecording
                     ? "bg-red-500 scale-110 shadow-lg shadow-red-500/30"
@@ -401,14 +957,50 @@ export default function InterviewSession({
                 )}
               </button>
 
+              <button
+                onClick={liveMode ? stopLiveMic : startLiveMic}
+                disabled={!connected}
+                className={`h-9 rounded-md border px-3 text-xs font-medium transition-colors ${
+                  liveMode
+                    ? "border-green-400/30 bg-green-400/10 text-green-400"
+                    : "border-[#27272a] bg-[#111113] text-[#71717a] hover:border-[#3f3f46] hover:text-[#e8e8e8]"
+                } disabled:opacity-40`}
+              >
+                Live
+              </button>
+
               <div className="flex-1 text-xs text-[#52525b] text-center">
-                {isRecording
-                  ? "🔴 Recording — release to send"
+                {liveMode
+                  ? isRecording
+                    ? "Listening…"
+                    : "Live mic on"
+                  : isRecording
+                  ? "Recording — release to send"
                   : connected
-                  ? "Hold mic or Space bar to speak"
+                  ? "Hold mic or Space bar, or use Live"
                   : "Connecting…"}
               </div>
             </div>
+            {(audioStatus !== "idle" || audioError) && (
+              <div className="mt-3 rounded-md border border-[#27272a] bg-[#111113] px-3 py-2">
+                <div className="flex items-center justify-between gap-3 text-xs">
+                  <span className={audioStatus === "error" ? "text-red-400" : "text-[#a1a1aa]"}>
+                    {audioError ?? "Audio"}
+                  </span>
+                  {audioStatus !== "error" && (
+                    <span className="shrink-0 text-[#52525b]">{AUDIO_PIPELINE_LABELS[audioStatus]}</span>
+                  )}
+                </div>
+                <div className="mt-2 h-1 overflow-hidden rounded-full bg-[#27272a]">
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${
+                      audioStatus === "error" ? "bg-red-400" : "bg-green-400"
+                    }`}
+                    style={{ width: AUDIO_PIPELINE_PROGRESS[audioStatus] }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

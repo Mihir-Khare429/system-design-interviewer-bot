@@ -9,6 +9,7 @@ import base64
 import os
 import pytest
 import httpx
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
 from starlette.testclient import TestClient
@@ -542,17 +543,27 @@ class TestWebSocketEndpoint:
         s = MagicMock()
         s.start = AsyncMock(return_value=None)
         s.stop = AsyncMock(return_value=None)
+        s.interrupt = AsyncMock(return_value=None)
         s.process_audio = AsyncMock(return_value=None)
         s.generate_scorecard = AsyncMock(return_value=None)
+        s.update_whiteboard = MagicMock(return_value=None)
         return s
+
+    @contextmanager
+    def _patched_ws_app(self, mock_session):
+        user = MagicMock()
+        user.id = 123
+        with patch("app.main.init_db", new=AsyncMock(return_value=None)), \
+             patch("app.main.get_user_from_token", new=AsyncMock(return_value=user)), \
+             patch("app.main.check_can_start_interview", new=AsyncMock(return_value=(True, None))), \
+             patch("app.main.ui_runner") as mock_runner:
+            mock_runner.create_ui_session.return_value = mock_session
+            yield mock_runner
 
     def test_receives_session_started_on_connect(self):
         mock_session = self._make_mock_session()
 
-        with patch("app.main.ui_runner") as mock_runner, \
-             patch("app.main.asyncio.create_task", side_effect=lambda c: c.close()):
-            mock_runner.create_ui_session.return_value = mock_session
-
+        with self._patched_ws_app(mock_session):
             with TestClient(app) as client:
                 with client.websocket_connect("/ws/interview") as ws:
                     data = ws.receive_json()
@@ -562,10 +573,7 @@ class TestWebSocketEndpoint:
     def test_audio_message_dispatches_process_audio(self):
         mock_session = self._make_mock_session()
 
-        with patch("app.main.ui_runner") as mock_runner, \
-             patch("app.main.asyncio.create_task", side_effect=lambda c: c.close()):
-            mock_runner.create_ui_session.return_value = mock_session
-
+        with self._patched_ws_app(mock_session):
             with TestClient(app) as client:
                 with client.websocket_connect("/ws/interview") as ws:
                     ws.receive_json()  # session_started
@@ -574,28 +582,74 @@ class TestWebSocketEndpoint:
                         "data": base64.b64encode(b"fake audio").decode(),
                         "mime": "audio/webm",
                     })
-                    # Give the server a moment to process before disconnect
-            # If no exception was raised, the audio branch was exercised
+                    ack = ws.receive_json()
+                    assert ack["type"] == "audio_received"
+                    assert ack["bytes"] == len(b"fake audio")
+                    assert ack["mime"] == "audio/webm"
+
+        mock_session.process_audio.assert_awaited()
+        args = mock_session.process_audio.await_args.args
+        assert args == (b"fake audio", "audio/webm")
+
+    def test_invalid_audio_payload_returns_error(self):
+        mock_session = self._make_mock_session()
+
+        with self._patched_ws_app(mock_session):
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/interview") as ws:
+                    ws.receive_json()  # session_started
+                    ws.send_json({
+                        "type": "audio",
+                        "data": "not valid base64",
+                        "mime": "audio/webm",
+                    })
+                    err = ws.receive_json()
+                    assert err["type"] == "error"
+                    assert "Invalid audio" in err["message"]
+
+        mock_session.process_audio.assert_not_awaited()
+
+    def test_speech_start_dispatches_interrupt(self):
+        mock_session = self._make_mock_session()
+
+        with self._patched_ws_app(mock_session):
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/interview") as ws:
+                    ws.receive_json()  # session_started
+                    ws.send_json({"type": "speech_start"})
+
+        mock_session.interrupt.assert_awaited()
+
+    def test_whiteboard_message_updates_session_context(self):
+        mock_session = self._make_mock_session()
+        snapshot = {
+            "nodes": [{"id": "n1", "label": "API", "type": "service"}],
+            "edges": [],
+        }
+
+        with self._patched_ws_app(mock_session):
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/interview") as ws:
+                    ws.receive_json()  # session_started
+                    ws.send_json({"type": "whiteboard", "snapshot": snapshot})
+
+        mock_session.update_whiteboard.assert_called_once_with(snapshot)
 
     def test_end_message_dispatches_generate_scorecard(self):
         mock_session = self._make_mock_session()
 
-        with patch("app.main.ui_runner") as mock_runner, \
-             patch("app.main.asyncio.create_task", side_effect=lambda c: c.close()):
-            mock_runner.create_ui_session.return_value = mock_session
-
+        with self._patched_ws_app(mock_session):
             with TestClient(app) as client:
                 with client.websocket_connect("/ws/interview") as ws:
                     ws.receive_json()  # session_started
                     ws.send_json({"type": "end"})
 
+        mock_session.generate_scorecard.assert_awaited()
+
     def test_session_cleaned_up_on_disconnect(self):
         mock_session = self._make_mock_session()
 
-        with patch("app.main.ui_runner") as mock_runner, \
-             patch("app.main.asyncio.create_task", side_effect=lambda c: c.close()):
-            mock_runner.create_ui_session.return_value = mock_session
-
+        with self._patched_ws_app(mock_session) as mock_runner:
             with TestClient(app) as client:
                 with client.websocket_connect("/ws/interview") as ws:
                     ws.receive_json()  # session_started
@@ -607,10 +661,7 @@ class TestWebSocketEndpoint:
     def test_topic_and_difficulty_passed_to_session(self):
         mock_session = self._make_mock_session()
 
-        with patch("app.main.ui_runner") as mock_runner, \
-             patch("app.main.asyncio.create_task", side_effect=lambda c: c.close()):
-            mock_runner.create_ui_session.return_value = mock_session
-
+        with self._patched_ws_app(mock_session) as mock_runner:
             with TestClient(app) as client:
                 with client.websocket_connect(
                     "/ws/interview?topic=kafka&difficulty=hard"
