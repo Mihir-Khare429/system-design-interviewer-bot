@@ -306,8 +306,17 @@ async def interview_websocket(
                 if isinstance(snapshot, dict):
                     session.update_whiteboard(snapshot)
             elif msg_type == "audio":
-                audio_bytes = base64.b64decode(data["data"])
+                try:
+                    audio_bytes = base64.b64decode(data["data"], validate=True)
+                except Exception:
+                    await websocket.send_json({"type": "error", "message": "Invalid audio payload."})
+                    continue
                 mime = data.get("mime", "audio/webm")
+                await websocket.send_json({
+                    "type": "audio_received",
+                    "bytes": len(audio_bytes),
+                    "mime": mime,
+                })
                 asyncio.create_task(session.process_audio(audio_bytes, mime))
             elif msg_type == "end":
                 asyncio.create_task(session.generate_scorecard())

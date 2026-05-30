@@ -292,28 +292,29 @@ class UISession:
 
     async def generate_scorecard(self) -> None:
         await self._send({"type": "scorecard_loading"})
-        scorecard_msgs = list(self._history)
-        if self._whiteboard_summary:
-            scorecard_msgs.append({"role": "system", "content": self._whiteboard_prompt()})
-        scorecard_msgs.append({"role": "system", "content": SCORECARD_PROMPT})
-        try:
-            completion = await _openai.chat.completions.create(
-                model=settings.llm_model,
-                messages=scorecard_msgs,
-                max_tokens=500,
-                temperature=0.2,
-            )
-            raw = completion.choices[0].message.content.strip()
-            usage = getattr(completion, "usage", None)
-            if usage is not None:
-                self._meter.record_llm(getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0))
-            m = re.search(r"\{.*\}", raw, re.DOTALL)
-            data = json.loads(m.group()) if m else {"summary": raw, "grade": "N/A", "hire": "N/A", "strengths": [], "gaps": [], "study": []}
-        except Exception as exc:
-            logger.error("[%s] Scorecard error: %s", self.session_id, exc)
-            data = {"error": "Could not generate scorecard. Please review the transcript manually."}
-        await self._send({"type": "scorecard", "data": data})
-        await self._persist_end(scorecard=data)
+        async with self._turn_lock:
+            scorecard_msgs = list(self._history)
+            if self._whiteboard_summary:
+                scorecard_msgs.append({"role": "system", "content": self._whiteboard_prompt()})
+            scorecard_msgs.append({"role": "system", "content": SCORECARD_PROMPT})
+            try:
+                completion = await _openai.chat.completions.create(
+                    model=settings.llm_model,
+                    messages=scorecard_msgs,
+                    max_tokens=500,
+                    temperature=0.2,
+                )
+                raw = completion.choices[0].message.content.strip()
+                usage = getattr(completion, "usage", None)
+                if usage is not None:
+                    self._meter.record_llm(getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0))
+                m = re.search(r"\{.*\}", raw, re.DOTALL)
+                data = json.loads(m.group()) if m else {"summary": raw, "grade": "N/A", "hire": "N/A", "strengths": [], "gaps": [], "study": []}
+            except Exception as exc:
+                logger.error("[%s] Scorecard error: %s", self.session_id, exc)
+                data = {"error": "Could not generate scorecard. Please review the transcript manually."}
+            await self._send({"type": "scorecard", "data": data})
+            await self._persist_end(scorecard=data)
 
     # ------------------------------------------------------------------
     # Audio ingestion
@@ -328,13 +329,20 @@ class UISession:
         async with self._turn_lock:
             self._barge_in.clear()
             try:
+                await self._send({"type": "processing_state", "state": "transcribing"})
                 transcript = await self._transcribe(audio_bytes, mime_type)
                 if not transcript:
+                    await self._send({
+                        "type": "processing_state",
+                        "state": "idle",
+                        "message": "No speech detected.",
+                    })
                     return
                 if generation_id != self._generation_id or self._barge_in.is_set():
                     return
 
                 await self._send({"type": "transcript", "text": transcript})
+                await self._send({"type": "processing_state", "state": "thinking"})
 
                 if self._phase == _PHASE_INTRO:
                     self._intro_exchanges += 1
@@ -347,6 +355,13 @@ class UISession:
                         await self._queue_response(response, generation_id)
                 if generation_id == self._generation_id and not self._barge_in.is_set():
                     await self._check_phase_transition()
+            except Exception as exc:
+                logger.error("[%s] Audio processing error: %s", self.session_id, exc)
+                await self._send({
+                    "type": "processing_state",
+                    "state": "error",
+                    "message": "Audio processing failed.",
+                })
             finally:
                 if self._tts_queue.empty():
                     self._speaking = False
@@ -486,6 +501,13 @@ class UISession:
                 self._tts_queue.task_done()
                 if self._tts_queue.empty():
                     self._speaking = False
+                    if (
+                        self.is_active
+                        and item is not None
+                        and item.generation_id == self._generation_id
+                        and not self._barge_in.is_set()
+                    ):
+                        await self._send({"type": "processing_state", "state": "idle"})
 
     async def _transcribe(self, audio_bytes: bytes, mime_type: str) -> Optional[str]:
         ext = mime_type.split("/")[-1].split(";")[0]

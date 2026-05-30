@@ -582,8 +582,32 @@ class TestWebSocketEndpoint:
                         "data": base64.b64encode(b"fake audio").decode(),
                         "mime": "audio/webm",
                     })
-                    # Give the server a moment to process before disconnect
-            # If no exception was raised, the audio branch was exercised
+                    ack = ws.receive_json()
+                    assert ack["type"] == "audio_received"
+                    assert ack["bytes"] == len(b"fake audio")
+                    assert ack["mime"] == "audio/webm"
+
+        mock_session.process_audio.assert_awaited()
+        args = mock_session.process_audio.await_args.args
+        assert args == (b"fake audio", "audio/webm")
+
+    def test_invalid_audio_payload_returns_error(self):
+        mock_session = self._make_mock_session()
+
+        with self._patched_ws_app(mock_session):
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/interview") as ws:
+                    ws.receive_json()  # session_started
+                    ws.send_json({
+                        "type": "audio",
+                        "data": "not valid base64",
+                        "mime": "audio/webm",
+                    })
+                    err = ws.receive_json()
+                    assert err["type"] == "error"
+                    assert "Invalid audio" in err["message"]
+
+        mock_session.process_audio.assert_not_awaited()
 
     def test_speech_start_dispatches_interrupt(self):
         mock_session = self._make_mock_session()
@@ -619,6 +643,8 @@ class TestWebSocketEndpoint:
                 with client.websocket_connect("/ws/interview") as ws:
                     ws.receive_json()  # session_started
                     ws.send_json({"type": "end"})
+
+        mock_session.generate_scorecard.assert_awaited()
 
     def test_session_cleaned_up_on_disconnect(self):
         mock_session = self._make_mock_session()
