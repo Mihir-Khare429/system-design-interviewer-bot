@@ -4,6 +4,40 @@ All notable changes to the System Design Interviewer Bot are documented here.
 
 ---
 
+## [2026-05-30] — Realtime Browser Interview Audio Pipeline + End Interview Reliability
+
+### Fixed
+
+- **Browser recording delivery** (`frontend/src/components/interview/InterviewSession.tsx`) — fixed a push-to-talk race where the user could release the mic before `getUserMedia()` finished. The recorder now tracks a pending-start state and honors early stop requests, so short but valid recordings are stopped, encoded, and sent instead of getting stuck locally.
+- **End Interview final-turn race** (`frontend/src/components/interview/InterviewSession.tsx`, `app/ui_session.py`) — ending the interview now waits for any active recording to upload before sending `end`, and the backend serializes scorecard generation behind the active STT/LLM turn. The final spoken answer is included in the transcript before scoring.
+- **Stale WebSocket close handlers** (`frontend/src/components/interview/InterviewSession.tsx`) — guarded WebSocket lifecycle callbacks so an old development-mode socket close cannot clear `wsRef` after a replacement socket is already open. This fixed the false **"Not connected. Refresh the page and try again."** message on End Interview.
+- **Invalid audio payload handling** (`app/main.py`) — WebSocket audio frames are now base64-decoded with validation. Bad payloads return an `error` frame instead of falling into the generic session error path.
+- **Silent short-recording failures** (`frontend/src/components/interview/InterviewSession.tsx`) — recordings that are too short to process now surface an audio-pipeline error instead of failing invisibly.
+
+### Added
+
+- **Observable audio pipeline protocol** (`app/main.py`, `app/ui_session.py`) — server now sends `audio_received` immediately after accepting an audio frame, then `processing_state` events for `transcribing`, `thinking`, `idle`, and `error`.
+- **Audio status UI** (`frontend/src/components/interview/InterviewSession.tsx`) — interview controls now show a compact progress/status bar for opening mic, recording, uploading, transcribing, thinking, speaking, scoring, and errors.
+- **Live candidate transcript draft** (`frontend/src/components/interview/InterviewSession.tsx`) — browser speech recognition displays the user's speech in the chat while recording; the backend Whisper transcript remains the authoritative final user message.
+- **Frontend project README** (`frontend/README.md`) — replaced the stock Next.js README with app-specific setup, interview-room protocol, audio behavior, troubleshooting, and source map notes.
+- **Documentation for the current Next.js browser app** (`README.md`) — root README now describes `localhost:3000` as the primary browser app, `localhost:8000` as the FastAPI backend, and documents the real-time audio/end-interview pipeline.
+
+### Changed
+
+- **MediaRecorder usage** — recordings now flush data in 250ms timeslices and request final data before stopping, reducing lost-audio risk on quick turns.
+- **Pointer handling** — the mic button uses pointer capture/cancel handling instead of stopping on pointer leave, which avoids accidental drops while holding the button.
+- **Scorecard UX** — scorecard loading is sent immediately, while scoring waits internally for the active audio turn to complete.
+- **Troubleshooting docs** — added notes for stale frontend tabs, backend URL configuration, and Next.js `.next` chunk-cache errors.
+- **Generated report cleanup** (`.gitignore`) — e2e interview reports now use a wildcard ignore rule instead of accumulating timestamp-specific report paths.
+
+### Tests
+
+- `python -m pytest tests/test_main.py tests/test_ui_session.py -q` → 127 passed.
+- `python -m pytest tests/e2e/test_full_interview.py -q --timeout=120` → 1 passed and generated HTML/JSON reports under `reports/`.
+- `cd frontend && npm run build` → Next.js production build passed.
+
+---
+
 ## [2026-05-14] — DPO Fine-Tuning Pipeline + Streaming Delivery + Barge-In
 
 ### Added

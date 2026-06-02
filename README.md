@@ -4,7 +4,7 @@ An AI interviewer that conducts structured, real-feeling system design interview
 
 | Mode | How |
 |---|---|
-| **Browser UI** | Open `http://localhost:8000/ui` — draw your design on a canvas and talk to Alex via mic |
+| **Browser app** | Open `http://localhost:3000` — choose a problem, draw your design on a whiteboard, and talk to Alex via mic |
 | **Video call bot** | Bot joins your Zoom / Google Meet, speaks via TTS, listens via transcription |
 
 Alex is a **Senior Staff Engineer** persona that runs a 4-phase interview: warm-up → constraint clarification → design → adversarial deep dive. At the end, it generates a structured performance scorecard.
@@ -33,14 +33,15 @@ Every session follows the same four phases, escalating naturally:
 - Asks one sharp, focused question at a time
 - Keeps the LLM context lean via **relevance-scored context prioritization** (see below)
 
-**Browser UI mode:**
-- Setup screen to pick **topic** (Storage / Distributed / Real-time / Messaging / Search / ML) and **difficulty** (Junior / Mid-level / Senior / Staff) before starting
-- Canvas with 13 draggable system design components (LB, Cache, DB, Queue, CDN, etc.)
-- Arrows between components with click-to-delete
-- Push-to-talk mic (hold button or hold Space bar)
-- Live transcript with slide-in message bubbles
-- Phase badge + animated transition banners
-- **End Interview** button generates a structured AI scorecard
+**Browser app mode:**
+- Next.js web app with auth, dashboard, pricing, problem selection, difficulty selection, and saved interview history
+- React Flow whiteboard with draggable system design components (LB, Cache, DB, Queue, CDN, etc.)
+- Whiteboard snapshots are sent over WebSocket, summarized, and included in Alex's prompt so follow-up questions can reference what the candidate drew
+- Push-to-talk mic (hold button or hold Space bar) and Live mic mode with voice activity detection
+- Real-time candidate transcript draft while speaking, then server-verified transcript once Whisper returns
+- Audio pipeline status bar for opening mic, recording, uploading, transcribing, thinking, speaking, scoring, and error states
+- Barge-in support: when the candidate starts speaking, Alex stops talking and the stale response/audio is discarded
+- **End Interview** waits for any active recording to upload/process before generating the structured scorecard
 
 **Video call bot mode:**
 - Joins Zoom / Google Meet as a participant
@@ -107,18 +108,17 @@ Scoring overhead: <2ms (pure Python, no network calls, no external dependencies)
 ┌──────────────────────────────────────────────────────────────┐
 │                        Your Machine                          │
 │                                                              │
-│  ┌───────────┐   ┌──────────┐   ┌──────────────────────┐    │
-│  │  FastAPI  │   │  Kokoro  │   │   Ollama (host)      │    │
-│  │  :8000   │   │  TTS     │   │   LLM :11434         │    │
-│  │  /ui      │   │  :8880   │   │   qwen2.5 / llava    │    │
-│  │  /ws/…   │   └──────────┘   └──────────────────────┘    │
-│  └─────┬─────┘                                              │
-│        │ Browser UI             │ Video Call Bot             │
-│  ┌─────▼──────┐          ┌──────▼─────┐                     │
-│  │  Browser   │          │   ngrok    │ ← public HTTPS       │
-│  │  (canvas + │          │   :4040   │                      │
-│  │   mic)     │          └──────┬─────┘                     │
-│  └────────────┘                 │ webhooks                  │
+│  ┌───────────┐   ┌──────────┐   ┌──────────┐   ┌───────────┐  │
+│  │ Next.js   │   │ FastAPI  │   │ Kokoro   │   │ Ollama    │  │
+│  │ frontend  │──▶│ API      │──▶│ TTS      │   │ LLM       │  │
+│  │ :3000     │   │ :8000    │   │ :8880    │   │ :11434    │  │
+│  └───────────┘   └────┬─────┘   └──────────┘   └───────────┘  │
+│                       │ Video Call Bot                         │
+│                ┌──────▼─────┐                                  │
+│                │   ngrok    │ ← public HTTPS                   │
+│                │   :4040    │                                  │
+│                └──────┬─────┘                                  │
+│                       │ webhooks                               │
 └─────────────────────────────────┼────────────────────────────┘
                                   │
                      ┌────────────▼──────────┐     ┌──────────────────┐
@@ -130,14 +130,19 @@ Scoring overhead: <2ms (pure Python, no network calls, no external dependencies)
 **Services (all run via Docker Compose):**
 | Service | Purpose |
 |---|---|
-| `app` | FastAPI server — canvas UI, WebSocket interview, webhook handler, bot orchestrator |
+| `app` | FastAPI server — REST API, WebSocket interview, webhook handler, bot orchestrator |
 | `kokoro` | Free local TTS — OpenAI-compatible `/v1/audio/speech` endpoint |
 | `ngrok` | Public HTTPS tunnel — needed for the video call bot mode only |
+
+**Frontend:**
+| App | Purpose |
+|---|---|
+| `frontend` | Next.js app at `http://localhost:3000` — auth, problem catalog, whiteboard, mic controls, transcript, scorecard |
 
 **External:**
 | Service | Purpose |
 |---|---|
-| OpenAI Whisper | Transcribes browser mic audio in UI mode (requires `OPENAI_API_KEY`) |
+| OpenAI Whisper | Transcribes browser mic audio in the browser app (requires `OPENAI_API_KEY`) |
 | Recall.ai | Sends a bot into the video call, streams transcription, plays audio (bot mode only) |
 | Ollama (host) | Runs LLM locally — chat completions + vision for whiteboard analysis |
 
@@ -148,12 +153,13 @@ Scoring overhead: <2ms (pure Python, no network calls, no external dependencies)
 | Requirement | Needed for | Notes |
 |---|---|---|
 | **Docker Desktop** | Both modes | [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop) |
+| **Node.js + npm** | Browser app | Node 20+ recommended for the Next.js frontend |
 | **Ollama** | Both modes | [ollama.com](https://ollama.com) — runs on your Mac/Linux host |
-| **OpenAI API key** | Browser UI (Whisper) | Used only for mic transcription. Kokoro + Ollama handle TTS and LLM for free |
+| **OpenAI API key** | Browser app (Whisper) | Used only for mic transcription. Kokoro + Ollama handle TTS and LLM for free |
 | **Recall.ai API key** | Video call bot only | Free developer key at [recall.ai](https://www.recall.ai) — create for **us-west-2** region |
 | **ngrok account** | Video call bot only | Free authtoken at [dashboard.ngrok.com](https://dashboard.ngrok.com/get-started/your-authtoken) |
 
-> You can run the **browser UI** with just Ollama + an OpenAI key (Whisper only). The video call bot is optional.
+> You can run the **browser app** with just Ollama + an OpenAI key (Whisper only). The video call bot is optional.
 
 ---
 
@@ -191,7 +197,7 @@ cp .env.example .env
 Open `.env` and fill in:
 
 ```env
-# Required for browser UI (Whisper transcription)
+# Required for browser app (Whisper transcription)
 OPENAI_API_KEY=sk-...
 
 # Required for video call bot mode only
@@ -209,10 +215,10 @@ TTS_BASE_URL=http://kokoro:8880/v1
 TTS_VOICE=af_bella
 ```
 
-### 4. Start the stack
+### 4. Start the backend stack
 
 ```bash
-docker compose up
+docker compose up -d
 ```
 
 Wait for all three services to start, then:
@@ -227,7 +233,24 @@ docker compose up -d   # recreates containers with updated .env
 
 > **Important:** Use `docker compose up -d` (not `restart`) to reload `.env` changes.
 
-### 5. Verify everything is running
+### 5. Start the frontend
+
+```bash
+cd frontend
+cp .env.local.example .env.local
+npm install
+npm run dev
+```
+
+Open `frontend/.env.local` and make sure the backend URL points at FastAPI:
+
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+The app runs at `http://localhost:3000`.
+
+### 6. Verify everything is running
 
 ```bash
 curl http://localhost:8000/health
@@ -241,18 +264,19 @@ curl http://localhost:8880/health
 
 ## Running an Interview
 
-### Option A — Browser UI (recommended for solo practice)
+### Option A — Browser app (recommended for solo practice)
 
 ```
-http://localhost:8000/ui
+http://localhost:3000
 ```
 
-1. **Setup screen** — choose a topic and difficulty, then click **Begin Interview**
-2. **Draw** your design by dragging components from the sidebar onto the canvas
-3. **Connect** components by clicking two nodes in sequence
-4. **Talk** by holding the mic button (or holding the Space bar)
-5. Alex hears you, responds with voice, and the phase indicator updates automatically
-6. Click **End Interview** to receive your scorecard
+1. Sign up or sign in
+2. Choose a problem from **Problems**
+3. Pick a difficulty and click **Start interview**
+4. Draw your architecture on the whiteboard
+5. Talk by holding the mic button/Space bar, or use **Live** mode for voice activity detection
+6. Watch the live transcript and audio status bar while Alex listens, thinks, and speaks
+7. Click **End interview** to receive your scorecard
 
 ### Option B — Video call bot
 
@@ -302,8 +326,17 @@ All settings are read from `.env`. See `.env.example` for the full list.
 | `LLM_VISION_MODEL` | `gpt-4o` | Vision model for whiteboard screenshot analysis |
 | `TTS_BASE_URL` | `https://api.openai.com/v1` | TTS API base — set to Kokoro for free local TTS |
 | `TTS_VOICE` | `onyx` | TTS voice name (`af_bella`, `am_michael`, `bm_george`, etc.) |
-| `OPENAI_API_KEY` | — | Required for browser UI mic transcription (Whisper). Also needed if `LLM_BASE_URL` / `TTS_BASE_URL` point to OpenAI |
+| `OPENAI_API_KEY` | — | Required for browser app mic transcription (Whisper). Also needed if `LLM_BASE_URL` / `TTS_BASE_URL` point to OpenAI |
 | `LLM_STREAMING` | `false` | Set to `true` to enable sentence-chunked streaming delivery and barge-in interruption |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./sdi.db` | Local SQLite database by default; use `postgresql+asyncpg://...` in production |
+| `JWT_SECRET` | `dev-secret-change-me-in-prod` | Required for auth tokens; replace in production |
+| `FRONTEND_ORIGIN` | `http://localhost:3000` | Allowed frontend origin and default billing redirect base |
+
+Frontend settings live in `frontend/.env.local`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | FastAPI base URL used for REST and WebSocket connections |
 
 ### Switching between OpenAI and local
 
@@ -383,13 +416,29 @@ mlflow ui --backend-store-uri ./mlruns
 
 ## Streaming Delivery & Barge-In
 
-Both the browser UI and the video call bot support **sentence-chunked streaming** for lower first-token latency:
+Both the browser app and the video call bot support **sentence-chunked streaming** for lower first-token latency:
 
 - LLM tokens are streamed and buffered until a sentence boundary (`.`, `!`, `?`) is detected.
 - Each complete sentence is sent to TTS and played back immediately — the candidate hears the first sentence while the rest is still being generated.
-- **Barge-in**: if the candidate starts speaking while Alex is still talking, the current TTS stream is interrupted between sentences. In the browser UI a `{"type": "interrupt"}` frame is sent; in the bot runner the next response replaces the current one.
+- **Barge-in**: if the candidate starts speaking while Alex is still talking, the current TTS stream is interrupted between sentences. In the browser app a `{"type": "interrupt"}` frame is sent; in the bot runner the next response replaces the current one.
 
 Enable streaming: set `LLM_STREAMING=true` in `.env` (default is `false` for compatibility).
+
+---
+
+## Browser Audio Pipeline
+
+The browser app sends every candidate turn through an observable WebSocket pipeline:
+
+1. Browser records WebM audio with `MediaRecorder`
+2. Client sends `speech_start` immediately so Alex can stop current playback
+3. Client sends `audio` with base64 data and MIME type
+4. Backend replies with `audio_received`
+5. Backend emits `processing_state=transcribing`, runs Whisper, then sends `transcript`
+6. Backend emits `processing_state=thinking`, generates Alex's next response, queues TTS, and sends response text/audio
+7. Client shows a compact status bar for recording, upload, transcription, thinking, speaking, scoring, and errors
+
+When **End interview** is clicked during an active recording, the client waits for that final audio upload before sending `end`. The backend also serializes scorecard generation behind the active STT/LLM turn, so the final answer is included in the report.
 
 ---
 
@@ -407,7 +456,11 @@ Or in watch mode (reruns on file change):
 make test-watch
 ```
 
-Current: **357 / 357 tests passing** (8 skipped — live LLM tests, see below).
+The suite is mostly mocked and does not require API keys. Recent focused verification:
+
+- `python -m pytest tests/test_main.py tests/test_ui_session.py -q` → 127 passed
+- `python -m pytest tests/e2e/test_full_interview.py -q --timeout=120` → 1 passed and writes HTML/JSON reports under `reports/`
+- `cd frontend && npm run build` → Next.js production build passes
 
 ### Human-likeness tests (requires Ollama running locally)
 
@@ -470,13 +523,17 @@ Change voice by setting `TTS_VOICE` in `.env` and running `docker compose up -d`
 ├── app/
 │   ├── main.py              # FastAPI routes — webhooks, /ui, /ws/interview
 │   ├── bot_runner.py        # Video call bot session — 4-phase flow, streaming, barge-in
-│   ├── ui_session.py        # Browser UI session — same 4-phase flow, WebSocket delivery
+│   ├── ui_session.py        # Browser app session — same 4-phase flow, WebSocket delivery
 │   ├── context_manager.py   # Context prioritization — cosine scoring, token budget, KV prefix
 │   ├── recall_client.py     # Recall.ai API client
 │   ├── config.py            # Settings loaded from .env
 │   ├── prompts.py           # Persona, PHASE_PROMPTS, DIFFICULTY_PROMPTS, INTERVIEW_PROBLEMS
 │   └── static/
-│       └── index.html       # Browser UI — setup screen, canvas, audio chat, scorecard
+│       └── index.html       # Legacy browser UI served by FastAPI
+├── frontend/
+│   ├── src/app/             # Next.js App Router pages
+│   ├── src/components/      # Interview, whiteboard, billing, layout components
+│   └── src/lib/             # API client, auth context, problem catalog
 ├── data/
 │   └── dpo_dataset.jsonl    # 25 DPO training examples (prompt / chosen / rejected)
 ├── scripts/
@@ -484,7 +541,7 @@ Change voice by setting `TTS_VOICE` in `.env` and running `docker compose up -d`
 │   └── eval_judge.py        # LLM-as-judge before/after evaluation, MLflow logging
 ├── tests/
 │   ├── test_context_manager.py  # 42 offline tests — context prioritization + KV prefix
-│   ├── test_ui_session.py       # 47 tests — streaming, barge-in, sentence chunking
+│   ├── test_ui_session.py       # Browser session tests — audio states, scorecard, streaming, barge-in
 │   ├── test_bot_runner.py       # Tests for video call session
 │   ├── test_dpo_dataset.py      # 19 tests — dataset schema + quality checks
 │   ├── test_train_dpo.py        # 37 tests — DPO training script (no GPU required)
@@ -529,10 +586,26 @@ Change voice by setting `TTS_VOICE` in `.env` and running `docker compose up -d`
 **Responses feel slow mid-interview**
 - Expected on weak hardware with large models — switch to `qwen2.5:1.5b-instruct` for faster responses
 - Context prioritization keeps the prompt lean (~1,500 tokens), so latency stays flat throughout the session regardless of conversation length
+- Enable `LLM_STREAMING=true` for lower first-audio latency, with sentence-level TTS delivery
 
 **Webhook URL invalid**
 - Must use `docker compose up -d` (not `docker compose restart`) to reload `.env`
 - Confirm ngrok URL matches `WEBHOOK_BASE_URL`: `curl http://localhost:4040/api/tunnels`
+
+**End Interview says "Not connected"**
+- Reload the interview page once after frontend hot reloads
+- Confirm the frontend points at the backend: `NEXT_PUBLIC_API_URL=http://localhost:8000`
+- Confirm the backend is healthy: `curl http://localhost:8000/health`
+- In development, stale WebSocket close events are guarded, but a tab opened before a frontend restart may still need a reload
+
+**Next.js dev error: `Cannot find module './<chunk>.js'`**
+- Stop `next dev`, remove `frontend/.next`, and start it again:
+  ```bash
+  cd frontend
+  rm -rf .next
+  npm run dev
+  ```
+- Avoid running `npm run build` while the dev server is serving from the same `.next` directory
 
 **Bot stuck in waiting room**
 - Zoom: admit the bot from the meeting controls
