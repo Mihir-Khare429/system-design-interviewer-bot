@@ -7,7 +7,7 @@ An AI interviewer that conducts structured, real-feeling system design interview
 | **Browser app** | Open `http://localhost:3000` — choose a problem, draw your design on a whiteboard, and talk to Alex via mic |
 | **Video call bot** | Bot joins your Zoom / Google Meet, speaks via TTS, listens via transcription |
 
-Alex is a **Senior Staff Engineer** persona that runs a 4-phase interview: warm-up → constraint clarification → design → adversarial deep dive. At the end, it generates a structured performance scorecard.
+Alex is a **Senior Staff Engineer** persona that runs a 4-phase interview: warm-up → constraint clarification → design → adversarial deep dive. At the end, it generates a structured performance scorecard and updates the candidate's long-lived strengths/weaknesses profile for future practice.
 
 ---
 
@@ -34,9 +34,10 @@ Every session follows the same four phases, escalating naturally:
 - Keeps the LLM context lean via **relevance-scored context prioritization** (see below)
 
 **Browser app mode:**
-- Next.js web app with auth, dashboard, pricing, problem selection, difficulty selection, and saved interview history
+- Next.js web app with auth, dashboard, pricing, problem selection, difficulty selection, saved interview history, and a read-only candidate profile
 - React Flow whiteboard with draggable system design components (LB, Cache, DB, Queue, CDN, etc.)
 - Whiteboard snapshots are sent over WebSocket, summarized, and included in Alex's prompt so follow-up questions can reference what the candidate drew
+- Candidate strengths and weaknesses persist across sessions and are used to frame targeted questions in later practice interviews
 - Push-to-talk mic (hold button or hold Space bar) and Live mic mode with voice activity detection
 - Real-time candidate transcript draft while speaking, then server-verified transcript once Whisper returns
 - Audio pipeline status bar for opening mic, recording, uploading, transcribing, thinking, speaking, scoring, and error states
@@ -77,6 +78,22 @@ After clicking **End Interview**, the bot analyses the full conversation and pro
 | **Strengths** | What the candidate did well |
 | **Gaps** | Specific weaknesses in the design |
 | **Study topics** | 2–3 targeted areas to review before the next interview |
+
+The browser app also uses the scorecard to update the candidate's accumulated profile. Repeated gaps are counted as persistent weaknesses and become higher-priority focus areas in later interviews.
+
+---
+
+## Candidate Memory
+
+Candidate memory is stored at the user-account level, so it survives browser refreshes, sign-out/sign-in, and future interview sessions.
+
+| Profile area | How it is maintained | How it is used |
+|---|---|---|
+| **Strengths** | Merged automatically from completed scorecards | Alex can acknowledge strong areas when relevant |
+| **Weaknesses** | Merged automatically from scorecard gaps, with repeat counts | Alex explicitly targets persistent weaknesses in new subproblems |
+| **Study focus** | Merged automatically from scorecard study topics | Dashboard shows what to review next |
+
+Candidates can view their profile on the Dashboard, but they cannot edit it. Admins can correct a profile through the admin API. Set `ADMIN_EMAILS` in `.env` to auto-promote matching accounts to admin on signup/signin.
 
 ---
 
@@ -233,6 +250,12 @@ docker compose up -d   # recreates containers with updated .env
 
 > **Important:** Use `docker compose up -d` (not `restart`) to reload `.env` changes.
 
+If you are upgrading an existing local database, apply migrations after the backend dependencies are installed:
+
+```bash
+alembic upgrade head
+```
+
 ### 5. Start the frontend
 
 ```bash
@@ -330,6 +353,7 @@ All settings are read from `.env`. See `.env.example` for the full list.
 | `LLM_STREAMING` | `false` | Set to `true` to enable sentence-chunked streaming delivery and barge-in interruption |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./sdi.db` | Local SQLite database by default; use `postgresql+asyncpg://...` in production |
 | `JWT_SECRET` | `dev-secret-change-me-in-prod` | Required for auth tokens; replace in production |
+| `ADMIN_EMAILS` | — | Comma-separated emails that are auto-promoted to admin on signup/signin; admins can edit candidate profiles |
 | `FRONTEND_ORIGIN` | `http://localhost:3000` | Allowed frontend origin and default billing redirect base |
 
 Frontend settings live in `frontend/.env.local`:
@@ -525,6 +549,7 @@ Change voice by setting `TTS_VOICE` in `.env` and running `docker compose up -d`
 │   ├── bot_runner.py        # Video call bot session — 4-phase flow, streaming, barge-in
 │   ├── ui_session.py        # Browser app session — same 4-phase flow, WebSocket delivery
 │   ├── context_manager.py   # Context prioritization — cosine scoring, token budget, KV prefix
+│   ├── candidate_profile.py # Candidate memory — scorecard merge, profile serialization, prompt context
 │   ├── recall_client.py     # Recall.ai API client
 │   ├── config.py            # Settings loaded from .env
 │   ├── prompts.py           # Persona, PHASE_PROMPTS, DIFFICULTY_PROMPTS, INTERVIEW_PROBLEMS
@@ -541,6 +566,7 @@ Change voice by setting `TTS_VOICE` in `.env` and running `docker compose up -d`
 │   └── eval_judge.py        # LLM-as-judge before/after evaluation, MLflow logging
 ├── tests/
 │   ├── test_context_manager.py  # 42 offline tests — context prioritization + KV prefix
+│   ├── test_candidate_profile.py # Candidate profile merge, serialization, and prompt tests
 │   ├── test_ui_session.py       # Browser session tests — audio states, scorecard, streaming, barge-in
 │   ├── test_bot_runner.py       # Tests for video call session
 │   ├── test_dpo_dataset.py      # 19 tests — dataset schema + quality checks
