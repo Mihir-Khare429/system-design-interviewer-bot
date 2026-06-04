@@ -30,11 +30,55 @@ class User(Base):
     name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
     plan: Mapped[str] = mapped_column(String(32), default="free")  # free | pro
+    role: Mapped[str] = mapped_column(String(32), default="user")  # user | admin
     stripe_customer_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     interviews: Mapped[list["InterviewRun"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     subscription: Mapped[Optional["Subscription"]] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan")
+    candidate_profile: Mapped[Optional["CandidateProfile"]] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan")
+
+
+class CandidateProfile(Base):
+    """Long-lived, user-level strengths and weaknesses inferred from scorecards."""
+
+    __tablename__ = "candidate_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    strengths_json: Mapped[str] = mapped_column(Text, default="[]")
+    weaknesses_json: Mapped[str] = mapped_column(Text, default="[]")
+    study_plan_json: Mapped[str] = mapped_column(Text, default="[]")
+    latest_grade: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    latest_hire: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    interview_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user: Mapped[User] = relationship(back_populates="candidate_profile")
+
+    @staticmethod
+    def _loads(raw: Optional[str]) -> list[dict]:
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    @property
+    def strengths(self) -> list[dict]:
+        return self._loads(self.strengths_json)
+
+    @property
+    def weaknesses(self) -> list[dict]:
+        return self._loads(self.weaknesses_json)
+
+    @property
+    def study_plan(self) -> list[dict]:
+        return self._loads(self.study_plan_json)
 
 
 class Subscription(Base):

@@ -20,10 +20,31 @@ type InterviewRow = {
   scorecard: Record<string, unknown> | null;
 };
 
+type ProfileItem = {
+  label: string;
+  count: number;
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
+  last_interview_run_id?: number | null;
+};
+
+type CandidateProfile = {
+  user_id: number | null;
+  summary: string | null;
+  strengths: ProfileItem[];
+  weaknesses: ProfileItem[];
+  study_plan: ProfileItem[];
+  latest_grade: string | null;
+  latest_hire: string | null;
+  interview_count: number;
+  updated_at: string | null;
+};
+
 type InterviewsResponse = {
   items: InterviewRow[];
   count: number;
   quota: { plan: string; used: number; limit: number; remaining: number };
+  profile: CandidateProfile;
 };
 
 function gradeColor(grade: string) {
@@ -84,6 +105,10 @@ export default function DashboardPage() {
     .filter(Boolean);
   const bestGrade = grades.sort()[0] ?? "—";
   const totalSpent = data.items.reduce((sum, r) => sum + (r.estimated_cost_usd || 0), 0);
+  const profile = data.profile;
+  const topWeaknesses = profile.weaknesses.slice(0, 3);
+  const topStrengths = profile.strengths.slice(0, 2);
+  const topStudy = profile.study_plan.slice(0, 3);
 
   return (
     <div className="min-h-screen bg-[#0a0a0b]">
@@ -109,10 +134,11 @@ export default function DashboardPage() {
           </Link>
         </div>
 
-        <div className="mb-8 grid grid-cols-3 gap-4">
+        <div className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-4">
           {[
             { label: "Interviews", value: String(data.count) },
             { label: "Best grade", value: bestGrade },
+            { label: "Focus areas", value: String(profile.weaknesses.length) },
             { label: "Spend (cost)", value: `$${totalSpent.toFixed(3)}` },
           ].map((s) => (
             <div key={s.label} className="rounded-xl border border-[#27272a] bg-[#111113] p-5 text-center">
@@ -199,6 +225,36 @@ export default function DashboardPage() {
           </div>
 
           <div>
+            <div className="mb-4 rounded-xl border border-[#27272a] bg-[#111113] p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-[#e8e8e8]">Candidate profile</h2>
+                  <p className="mt-1 text-xs text-[#71717a]">
+                    {profile.interview_count} completed scorecard{profile.interview_count === 1 ? "" : "s"}
+                  </p>
+                </div>
+                <span className="rounded-md border border-[#27272a] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[#71717a]">
+                  read-only
+                </span>
+              </div>
+
+              {profile.interview_count === 0 ? (
+                <p className="text-xs leading-relaxed text-[#71717a]">
+                  No completed scorecards yet.
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  {profile.summary && (
+                    <p className="text-xs leading-relaxed text-[#a1a1aa]">{profile.summary}</p>
+                  )}
+
+                  <ProfileList title="Targeted weaknesses" items={topWeaknesses} accent="red" />
+                  <ProfileList title="Strengths" items={topStrengths} accent="green" />
+                  <ProfileList title="Study focus" items={topStudy} accent="blue" />
+                </div>
+              )}
+            </div>
+
             {user?.plan !== "pro" && (
               <div className="rounded-xl border border-green-500/20 bg-green-500/5 p-4">
                 <div className="mb-2 text-xs font-semibold text-green-400">Upgrade to Pro</div>
@@ -216,6 +272,44 @@ export default function DashboardPage() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ProfileList({
+  title,
+  items,
+  accent,
+}: {
+  title: string;
+  items: ProfileItem[];
+  accent: "red" | "green" | "blue";
+}) {
+  const color =
+    accent === "red"
+      ? "bg-red-400"
+      : accent === "green"
+        ? "bg-green-400"
+        : "bg-blue-400";
+
+  if (items.length === 0) return null;
+
+  return (
+    <div>
+      <div className="mb-2 text-xs font-semibold text-[#e8e8e8]">{title}</div>
+      <ul className="space-y-2">
+        {items.map((item) => (
+          <li key={item.label} className="flex items-start gap-2 text-xs leading-relaxed text-[#a1a1aa]">
+            <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${color}`} />
+            <span className="min-w-0 flex-1">{item.label}</span>
+            {item.count > 1 && (
+              <span className="shrink-0 rounded-md border border-[#27272a] px-1.5 py-0.5 font-mono text-[10px] text-[#71717a]">
+                {item.count}x
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
