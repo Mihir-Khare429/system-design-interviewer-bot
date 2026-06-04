@@ -32,10 +32,11 @@ from openai import AsyncOpenAI
 from sqlalchemy import select
 
 from app.config import settings
+from app.candidate_profile import build_candidate_profile_prompt, update_candidate_profile_from_scorecard
 from app.context_manager import prioritize
 from app.cost_tracking import CostMeter, estimate_tokens
 from app.database import SessionLocal
-from app.models import InterviewRun, UsageEvent
+from app.models import CandidateProfile, InterviewRun, UsageEvent
 from app.prompts import (
     DIFFICULTY_PROMPTS,
     PHASE_PROMPTS,
@@ -176,6 +177,7 @@ class UISession:
         self._meter = CostMeter()
         self._run_id: Optional[int] = None
         self._persisted_end: bool = False
+        self._candidate_profile_prompt: str = ""
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -185,6 +187,9 @@ class UISession:
         self._ensure_tts_worker()
         self._problem = pick_problem(topic=self._topic, difficulty=self._difficulty)
         self._history.append({"role": "system", "content": REALTIME_CONVERSATION_PROMPT})
+        self._candidate_profile_prompt = await self._load_candidate_profile_prompt()
+        if self._candidate_profile_prompt:
+            self._history.append({"role": "system", "content": self._candidate_profile_prompt})
         if self._difficulty in DIFFICULTY_PROMPTS:
             self._history.append({"role": "system", "content": DIFFICULTY_PROMPTS[self._difficulty]})
         self._history.append({"role": "system", "content": PHASE_PROMPTS[_PHASE_INTRO]})
@@ -282,9 +287,39 @@ class UISession:
                     ))
                 self._meter.events.clear()
                 await db.commit()
+            if scorecard is not None and not scorecard.get("error"):
+                await self._update_candidate_profile(scorecard)
             self._persisted_end = True
         except Exception as exc:
             logger.warning("[%s] Could not persist InterviewRun end: %s", self.session_id, exc)
+
+    async def _load_candidate_profile_prompt(self) -> str:
+        if self._user_id is None:
+            return ""
+        try:
+            async with SessionLocal() as db:
+                profile = (
+                    await db.execute(select(CandidateProfile).where(CandidateProfile.user_id == self._user_id))
+                ).scalar_one_or_none()
+                return build_candidate_profile_prompt(profile)
+        except Exception as exc:
+            logger.warning("[%s] Could not load candidate profile: %s", self.session_id, exc)
+            return ""
+
+    async def _update_candidate_profile(self, scorecard: dict) -> None:
+        if self._user_id is None:
+            return
+        try:
+            async with SessionLocal() as db:
+                await update_candidate_profile_from_scorecard(
+                    db,
+                    user_id=self._user_id,
+                    scorecard=scorecard,
+                    interview_run_id=self._run_id,
+                )
+                await db.commit()
+        except Exception as exc:
+            logger.warning("[%s] Could not update candidate profile: %s", self.session_id, exc)
 
     # ------------------------------------------------------------------
     # Score card

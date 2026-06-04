@@ -4,6 +4,35 @@ All notable changes to the System Design Interviewer Bot are documented here.
 
 ---
 
+## [2026-06-04] — Persistent Candidate Memory + Targeted Practice
+
+### Added
+
+- **Candidate profile memory** (`app/models.py`, `app/candidate_profile.py`) — added a user-level `CandidateProfile` record that persists accumulated strengths, weaknesses, study topics, latest scorecard metadata, and completed-interview count across sessions.
+- **Automatic profile updates from scorecards** (`app/ui_session.py`) — completed browser interviews now merge scorecard `strengths`, `gaps`, and `study` fields into the candidate profile. Repeated weaknesses gain weight and are surfaced first for future practice.
+- **Targeted future-interview prompt context** (`app/candidate_profile.py`, `app/ui_session.py`) — when a candidate starts a new browser interview, Alex receives a persistent profile prompt with the strongest recurring weaknesses and is instructed to explicitly target them through related new subproblems instead of repeating the previous scenario.
+- **Read-only candidate profile on Dashboard** (`frontend/src/app/dashboard/page.tsx`) — candidates can view their accumulated targeted weaknesses, strengths, study focus, and completed-scorecard count. The profile is visible but not editable by the candidate.
+- **Admin role + admin profile edit API** (`app/auth.py`, `app/problems_api.py`, `app/config.py`) — added `users.role`, an `ADMIN_EMAILS` bootstrap setting, admin badge support, and `PATCH /api/admin/users/{user_id}/profile` for admin-only profile correction.
+- **Candidate profile API** (`app/problems_api.py`) — added `GET /api/profile` and included profile data in `GET /api/interviews` so dashboard data loads in one request.
+- **Database migration** (`alembic/versions/9b62f1c4a79e_add_candidate_profiles.py`) — adds `users.role` and the `candidate_profiles` table.
+
+### Changed
+
+- **Dashboard metrics** — dashboard summary now includes focus-area count alongside interviews, best grade, and cost.
+- **Auth response shape** — `/api/auth/signup`, `/api/auth/signin`, and `/api/auth/me` now include `role` so the frontend can distinguish normal users from admins.
+- **Interview personalization** — the browser interview flow now blends long-lived candidate profile context with existing difficulty, phase, whiteboard, and conversation context.
+
+### Tests
+
+- `.venv/bin/pytest tests/test_candidate_profile.py tests/test_ui_session.py -q` → 84 passed.
+- `.venv/bin/pytest tests/test_main.py -q` → 51 passed.
+- `.venv/bin/pytest tests/e2e/test_full_interview.py -q` → 1 passed.
+- `cd frontend && npx tsc --noEmit` → passed.
+- `DATABASE_URL=sqlite+aiosqlite:///<temp-db> .venv/bin/alembic upgrade head` → migration passed.
+- `npm run lint` remains blocked by existing unrelated React hook/compiler lint errors in `frontend/src/components/interview/InterviewSession.tsx` and `frontend/src/lib/auth-context.tsx`.
+
+---
+
 ## [2026-05-30] — Realtime Browser Interview Audio Pipeline + End Interview Reliability
 
 ### Fixed

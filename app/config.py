@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-secret-change-me-in-prod"
     jwt_algorithm: str = "HS256"
     jwt_expires_minutes: int = 60 * 24 * 7  # 7 days
+    admin_emails: str = ""
 
     # Plans / quota
     free_monthly_interviews: int = 3

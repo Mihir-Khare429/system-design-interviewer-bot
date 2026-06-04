@@ -54,8 +54,21 @@ def create_access_token(user_id: int) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
+def _admin_email_set() -> set[str]:
+    return {
+        email.strip().lower()
+        for email in settings.admin_emails.split(",")
+        if email.strip()
+    }
+
+
+def is_admin_user(user: User) -> bool:
+    return user.role == "admin" or user.email.lower() in _admin_email_set()
+
+
 def _user_dict(u: User) -> dict:
-    return {"id": u.id, "email": u.email, "name": u.name, "plan": u.plan}
+    role = "admin" if is_admin_user(u) else u.role
+    return {"id": u.id, "email": u.email, "name": u.name, "plan": u.plan, "role": role}
 
 
 async def get_current_user(
@@ -72,6 +85,12 @@ async def get_current_user(
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
+    return user
+
+
+async def get_current_admin(user: User = Depends(get_current_user)) -> User:
+    if not is_admin_user(user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin access required")
     return user
 
 
@@ -92,7 +111,8 @@ async def signup(req: SignupRequest, db: AsyncSession = Depends(get_db)) -> Toke
     existing = (await db.execute(select(User).where(User.email == req.email))).scalar_one_or_none()
     if existing:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email already registered")
-    user = User(email=req.email, name=req.name, hashed_password=hash_password(req.password), plan="free")
+    role = "admin" if str(req.email).lower() in _admin_email_set() else "user"
+    user = User(email=req.email, name=req.name, hashed_password=hash_password(req.password), plan="free", role=role)
     db.add(user)
     await db.commit()
     await db.refresh(user)
@@ -104,6 +124,10 @@ async def signin(req: SigninRequest, db: AsyncSession = Depends(get_db)) -> Toke
     user = (await db.execute(select(User).where(User.email == req.email))).scalar_one_or_none()
     if not user or not verify_password(req.password, user.hashed_password):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
+    if user.email.lower() in _admin_email_set() and user.role != "admin":
+        user.role = "admin"
+        await db.commit()
+        await db.refresh(user)
     return TokenResponse(access_token=create_access_token(user.id), user=_user_dict(user))
 
 
